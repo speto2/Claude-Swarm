@@ -4,20 +4,22 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 
 ## What it does
 
-`/swarm 4 sonnet medium <task>` makes your Claude Code session the overseer:
+`/swarm <task>` makes your Claude Code session the overseer:
 
-1. It splits the task into pieces, each with its own files, so no two workers edit the same file.
-2. It runs up to the requested number of workers at the same time, each on the model and effort you chose. If there are fewer pieces than workers, it runs fewer workers.
-3. Workers share a run folder (task board, per-worker notes) and can message each other and the overseer.
-4. The overseer reviews each piece as it finishes and sends fix reports back to the worker that wrote it.
-5. When everything is done, it runs a final review (tests, build, lint, bugs, error handling, code quality, security) and writes a report.
-6. With `y` (see Usage), one terminal window per worker shows what that worker is doing, plus one window for the task board. The windows read local files and cost no tokens. They close themselves when the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. They show what workers print, including the first line of tool output, so a secret a worker prints can appear in a window.
+1. It splits the task into pieces, each with its own files, so no two workers edit the same file. Files that several pieces only add lines to, such as a route table, stay with the overseer, which adds those lines at the end.
+2. It shows you the plan (pieces, files, checks, workers) and waits for your go before starting anything.
+3. It runs the workers at the same time: one per piece by default, on sonnet at medium effort, or the number, model and effort you choose (see Usage).
+4. Workers share a run folder (task board, per-worker notes) and can message each other and the overseer.
+5. The overseer reviews each piece as it finishes and sends fix reports back to the worker that wrote it.
+6. When everything is done, it runs a final review (tests, build, lint, bugs, error handling, code quality, security) and writes a report, with the tokens and estimated cost of the overseer, every worker and any helper agent it started during the run.
+7. With `w` (see Usage), one terminal window per worker shows what that worker is doing, plus one window for the task board, which marks a worker that has finished or whose log has been quiet for 2 minutes. The windows read local files and cost no tokens. They close themselves when the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. They show what workers print, including the first line of tool output, so a secret a worker prints can appear in a window.
 
 ## Requirements
 
 - Claude Code 2.1.292 or later
 - Auto mode. Workers run in the background, where nobody can approve a prompt, so `/swarm` refuses to start without it.
 - Python 3 (standard library only)
+- Git is optional. Without it, the review cannot catch a worker editing files outside its tasks.
 - For the windows: Linux with X11 or Wayland and one of xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty or xterm. Without one, the overseer prints the commands to run instead.
 
 ## Install
@@ -57,22 +59,30 @@ Start a new Claude Code session afterwards: agent definitions are loaded when a 
 
 ## Choosing a model
 
-The overseer reviews all work, so cheap workers are usually enough: haiku or sonnet at low or medium effort. Your choice always wins.
+The overseer reviews all work, so cheap workers are usually enough: haiku or sonnet at low or medium effort.
+
+The overseer is usually the biggest cost, not the workers: every step it takes re-reads your whole session. Start `/swarm` in a fresh session (or after `/clear`), with a task line that stands on its own, so that context stays small.
 
 ## Usage
 
 ```
-Usage: /swarm <workers> <model> <effort> [windows] <task...>
-  workers  1-20
+Usage: /swarm [<workers>[w] <model> <effort>] <task...>
+  workers  1-20; add w (as in 4w) to open a terminal window per worker plus a task board
   model    haiku | sonnet | opus | fable
   effort   low | medium | high | xhigh | max
-  windows  y | yes | n | no (optional; default no). y opens a terminal window per worker plus a task board
-Example: /swarm 4 sonnet medium y add CSV export to the reports page, with tests
+Without them: one worker per task, sonnet, medium. Start with w for windows.
+A task that starts with a number needs the full form.
+Examples: /swarm add CSV export to the reports page, with tests
+          /swarm 4w sonnet medium add CSV export to the reports page, with tests
 ```
 
-The windows word is read only right after the effort. A task that itself starts with y, yes, n or no needs the windows word in front of it, for example `/swarm 2 haiku low n no longer log passwords in auth.py`.
+- `/swarm <task>`: the defaults, no windows.
+- `/swarm w <task>`: the defaults, with windows.
+- `/swarm 4 opus high <task>`: at most 4 workers on opus at high effort; `4w` adds the windows.
 
-To stop a running swarm, tell the overseer to stop. It stops every worker and reports what finished.
+The overseer then shows its plan. Reply go to start, describe changes to adjust it, or say stop.
+
+To stop a running swarm, tell the overseer to stop. It stops every worker and reports what finished, with the cost so far.
 
 ## Worker types
 
@@ -91,10 +101,12 @@ Each run writes to `.swarm/runs/<YYYYMMDD-HHMMSS>/` at the project root. `.swarm
 | File | Written by | Holds |
 |---|---|---|
 | `tasks.md` | overseer | The task board: owner, status, files, check, dependencies, fix rounds |
-| `roster.md` | overseer | Worker names, agent IDs, model and effort |
-| `snapshot.txt` | overseer | The starting commit and already-modified files, so reviews see only the swarm's changes |
+| `roster.md` | overseer | Worker names, agent IDs, model, effort and log paths |
+| `snapshot/`, `snapshot.json` | `swarm-run.py init` | Copies of the owned files and the starting git state, so reviews see only the swarm's changes |
 | `workers/<name>.md` | that worker | Status line, files changed, check results, notes for peers |
-| `report.md` | overseer | The final report |
+| `report.md` | overseer | The final report, with the cost table from `swarm-run.py cost` |
+
+The cost table reads Claude Code's own session logs and prices them at Anthropic's list prices as of 2026-11-03 (in `swarm-run.py`). It is an estimate: it doesn't know your plan or discounts, and prices change.
 
 Runs are kept as history. Delete `.swarm/` when you no longer need them.
 

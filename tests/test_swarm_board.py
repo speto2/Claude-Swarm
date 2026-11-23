@@ -67,6 +67,31 @@ class BoardTest(unittest.TestCase):
         self.assertIn("w1: (not a regular file)", sb.render(str(self.run)))
 
 
+    def test_activity_flags(self):
+        log = self.run / "agent-a.jsonl"
+        log.write_text("{}\n")
+        now = log.stat().st_mtime
+        self.assertEqual(sb.activity(str(log), now + 30), "")
+        self.assertEqual(sb.activity(str(log), now + 330), " (quiet 5m)")
+        (self.run / "agent-a.meta.json").write_text('{"finished": true}')
+        self.assertEqual(sb.activity(str(log), now + 330), " (finished)")
+        self.assertEqual(sb.activity("", now), "")
+        self.assertEqual(sb.activity(str(self.run / "missing.jsonl"), now), "")
+
+    def test_render_flags_quiet_worker_from_roster(self):
+        log = self.run / "agent-a.jsonl"
+        log.write_text("{}\n")
+        os.utime(log, (0, 0))
+        (self.run / "roster.md").write_text(
+            "| worker | agent id | model | effort | tasks | output file |\n|---|---|---|---|---|---|\n"
+            f"| w1-math | a | haiku | low | t1 | {log} |\n")
+        (self.run / "workers").mkdir()
+        (self.run / "workers" / "w1-math.md").write_text("status: testing\n")
+        (self.run / "workers" / "w2-str.md").write_text("status: editing\n")
+        out = sb.render(str(self.run))
+        self.assertRegex(out, r"w1-math: testing \(quiet \d+m\)")
+        self.assertIn("w2-str: editing\n", out + "\n")
+
     def test_run_over(self):
         dead = subprocess.Popen(["true"])
         dead.wait()

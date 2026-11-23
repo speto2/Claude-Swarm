@@ -23,11 +23,10 @@ for term in xfce4-terminal x-terminal-emulator gnome-terminal konsole kitty xter
   command -v "$term" >/dev/null 2>&1 || continue
   case $term in
     xfce4-terminal)      args=(--title "$title" -x) ;;
-    x-terminal-emulator) args=(-T "$title" -e) ;;
+    x-terminal-emulator|xterm) args=(-T "$title" -e) ;;
     gnome-terminal)      args=(--title "$title" --) ;;
     konsole)             args=(-p "tabtitle=$title" -e) ;;
     kitty)               args=(--title "$title") ;;
-    xterm)               args=(-T "$title" -e) ;;
   esac
   setsid -w "$term" "${args[@]}" "$@" >/dev/null 2>&1 </dev/null &
   pid=$!
