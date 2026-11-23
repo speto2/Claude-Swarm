@@ -28,8 +28,12 @@ Usage: /swarm <workers> <model> <effort> <task...>
 Example: /swarm 4 sonnet medium add CSV export to the reports page, with tests
 ```
 
-If your context does not show that auto mode is active, reply exactly this and stop:
-`/swarm needs auto mode: workers run in the background and can't wait for approvals. Switch to auto mode and run it again.`
+Then run one harmless Bash call (`pwd`), because the permission-mode note can arrive with a tool result. Then:
+
+- Context shows auto mode active: continue.
+- Context shows another mode: reply exactly this and stop:
+  `/swarm needs auto mode: workers run in the background and can't wait for approvals. Switch to auto mode and run it again.`
+- Context shows no mode: ask the user once whether auto mode is on.
 
 ## 2. Understand and split
 
@@ -60,7 +64,9 @@ If your context does not show that auto mode is active, reply exactly this and s
 - Write `<run>/tasks.md` (only you write it):
   `| id | title | owner | status | files | check | depends | fixes |`
   Status values: `pending`, `working`, `review`, `fixing`, `done`, `failed`, `stopped`.
-- Record a starting snapshot in `<run>/snapshot.txt`, so reviews see only the swarm's changes. In git: `git rev-parse HEAD` plus `git status --porcelain`. Without git: copy the owned files to `<run>/snapshot/`.
+- Record a starting snapshot, so reviews see only the swarm's changes:
+  - In git: save `git rev-parse HEAD` and `git status --porcelain --untracked-files=all` to `<run>/snapshot.txt`, and copy every owned file that is already modified or untracked to `<run>/snapshot/`.
+  - Without git: copy all owned files to `<run>/snapshot/`.
 
 ## 5. Spawn
 
@@ -96,7 +102,10 @@ bash "$B/open-window.sh" "swarm: board" python3 "$B/swarm-board.py" "<run>"
 - Reviews come before any other work, so no worker idles past its 5-minute cache. Review tasks that finish close together in one turn.
 - Per task: set status `review`, then:
   - read the worker's status file
-  - `git diff --stat` against the snapshot first, then only the parts that matter
+  - find what changed in the task's files. `git diff` alone misses new files:
+    - tracked files: `git diff --stat <snapshot HEAD> -- <files>`, then only the parts that matter
+    - files with a copy in `<run>/snapshot/`: `diff -u` against the copy
+    - files new since the snapshot (in `git status --porcelain --untracked-files=all` but not in `snapshot.txt`): read them directly
   - run the acceptance check and read only failure output (`| tail -n 40`)
 - Pass: status `done`. Fail: status `fixing`, add 1 to `fixes`, and send the same worker:
 
@@ -115,7 +124,7 @@ FIX <task-id> (round n/3)
 When every task is `done`:
 
 - Run the full test suite, build and lint where they exist.
-- Read the combined diff against the snapshot for parts that don't fit together, bugs, error handling, code quality and security (input handling, secrets, injection, permissions).
+- Read all changes since the snapshot, found the same way as in step 7 (new files included), for parts that don't fit together, bugs, error handling, code quality and security (input handling, secrets, injection, permissions).
 - A problem inside one worker's files: a FIX report to that worker. A problem spanning several workers' files: fix it yourself if it is a few lines; otherwise spawn one fixer worker (same model and effort) that owns those files.
 - Repeat until clean, at most 3 rounds.
 - If the user's CLAUDE.md asks for a step after code changes, run it once now. Workers skip such steps.
