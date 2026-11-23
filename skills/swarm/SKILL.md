@@ -1,6 +1,6 @@
 ---
 name: swarm
-description: Run a reviewed swarm of parallel worker subagents on a task. Usage: /swarm <workers> <model> <effort> [y|n] <task...>
+description: "Run a reviewed swarm of parallel worker subagents on a task. Usage: /swarm <workers> <model> <effort> [y|n] <task...>"
 argument-hint: <workers> <model> <effort> [y|n] <task...>
 disable-model-invocation: true
 ---
