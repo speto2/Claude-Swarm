@@ -11,14 +11,15 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 3. It runs the workers at the same time: one per piece by default, on sonnet at medium effort, or the number, model and effort you choose (see Usage).
 4. Workers share a run folder (task board, per-worker notes) and can message each other and the overseer.
 5. The overseer reviews each piece as it finishes and sends fix reports back to the worker that wrote it.
-6. When everything is done, it runs a final review (tests, build, lint, bugs, error handling, code quality, security) and writes a report, with the tokens and estimated cost of the overseer and every worker.
-7. With `w` (see Usage), one terminal window per worker shows what that worker is doing, plus one window for the task board, which flags a worker that has gone quiet for 2 minutes. The windows read local files and cost no tokens. They close themselves when the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. They show what workers print, including the first line of tool output, so a secret a worker prints can appear in a window.
+6. When everything is done, it runs a final review (tests, build, lint, bugs, error handling, code quality, security) and writes a report, with the tokens and estimated cost of the overseer, every worker and any helper agent it started during the run.
+7. With `w` (see Usage), one terminal window per worker shows what that worker is doing, plus one window for the task board, which marks a worker that has finished or whose log has been quiet for 2 minutes. The windows read local files and cost no tokens. They close themselves when the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. They show what workers print, including the first line of tool output, so a secret a worker prints can appear in a window.
 
 ## Requirements
 
 - Claude Code 2.1.292 or later
 - Auto mode. Workers run in the background, where nobody can approve a prompt, so `/swarm` refuses to start without it.
 - Python 3 (standard library only)
+- Git is optional. Without it, the review cannot catch a worker editing files outside its tasks.
 - For the windows: Linux with X11 or Wayland and one of xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty or xterm. Without one, the overseer prints the commands to run instead.
 
 ## Install
@@ -59,6 +60,7 @@ Start a new Claude Code session afterwards: agent definitions are loaded when a 
 ## Choosing a model
 
 The overseer reviews all work, so cheap workers are usually enough: haiku or sonnet at low or medium effort.
+
 The overseer is usually the biggest cost, not the workers: every step it takes re-reads your whole session. Start `/swarm` in a fresh session (or after `/clear`), with a task line that stands on its own, so that context stays small.
 
 ## Usage
@@ -80,7 +82,7 @@ Examples: /swarm add CSV export to the reports page, with tests
 
 The overseer then shows its plan. Reply go to start, describe changes to adjust it, or say stop.
 
-To stop a running swarm, tell the overseer to stop. It stops every worker and reports what finished.
+To stop a running swarm, tell the overseer to stop. It stops every worker and reports what finished, with the cost so far.
 
 ## Worker types
 
