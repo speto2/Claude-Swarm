@@ -22,6 +22,26 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 
 ## Install
 
+### With Claude Code
+
+Paste this prompt into Claude Code, from any folder. It clones the repository to `~/Claude-Swarm`, links the skill and the two worker agents, and runs the tests. It never overwrites an existing file or folder.
+
+```text
+Install the /swarm skill from https://github.com/speto2/Claude-Swarm for me. Do these steps in order and stop at the first problem:
+1. If ~/Claude-Swarm already exists, stop and ask me what to do. Otherwise run: git clone https://github.com/speto2/Claude-Swarm.git ~/Claude-Swarm
+2. Check that python3 is installed and that `claude --version` is 2.1.292 or later. On Linux, also say whether one of these terminals is installed for the optional live windows: xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty, xterm. Report anything missing.
+3. Create ~/.claude/skills and ~/.claude/agents if they are missing. Then create these three symbolic links with `ln -s`, using absolute paths. Check each link path first: if it already exists, do not touch it, stop and tell me.
+   - ~/.claude/skills/swarm -> ~/Claude-Swarm/skills/swarm
+   - ~/.claude/agents/swarm-worker.md -> ~/Claude-Swarm/agents/swarm-worker.md
+   - ~/.claude/agents/swarm-worker-web.md -> ~/Claude-Swarm/agents/swarm-worker-web.md
+4. In ~/Claude-Swarm, run: python3 -m unittest discover -s tests
+5. Report what you did and the test result. Then tell me to start a new Claude Code session and switch to auto mode before I run /swarm.
+```
+
+The links point into `~/Claude-Swarm`, so keep that folder where it is.
+
+### By hand
+
 From the root of this repository:
 
 ```bash
@@ -83,6 +103,8 @@ Runs are kept as history. Delete `.swarm/` when you no longer need them.
 ```bash
 rm ~/.claude/skills/swarm ~/.claude/agents/swarm-worker.md ~/.claude/agents/swarm-worker-web.md
 ```
+
+If you installed with the Claude Code prompt, you can then delete `~/Claude-Swarm`.
 
 ## Tests
 
