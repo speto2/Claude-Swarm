@@ -1,0 +1,12 @@
+{"type": "user", "message": {"role": "user", "content": "You are w1-math.\nTasks: t1"}}
+{"type": "user", "message": {"role": "user", "content": "<system-reminder>\nYour final report is delivered through SubagentHandback.\n</system-reminder>"}}
+{"type": "attachment", "attachment": {"type": "hook_success", "hookName": "SessionStart"}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "plan the work"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "python3 -m unittest discover -s demo"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": false, "content": "OK\nRan 2 tests"}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "is_error": true, "content": [{"type": "text", "text": "Exit code 1\nTraceback"}]}]}}
+{"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<agent-message from=\"ab12\">\nPING from w2\n</agent-message>"}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Tests pass."}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t3", "name": "SendMessage", "input": {"to": "main", "message": "DONE t1\nadded mathx"}}]}}
+{"type": "api-request-blob", "blob": "..."}
+{"type": "brand-new-type", "x": 1}
