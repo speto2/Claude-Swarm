@@ -1,0 +1,4 @@
+# Design notes, plans and build records stay local
+docs/
+.superpowers/
+CLAUDE.md
