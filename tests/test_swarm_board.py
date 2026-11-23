@@ -1,8 +1,13 @@
+import contextlib
 import importlib.util
+import io
+import os
 import pathlib
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("swarm_board", ROOT / "skills" / "swarm" / "scripts" / "swarm-board.py")
@@ -41,6 +46,47 @@ class BoardTest(unittest.TestCase):
         out = sb.render(str(self.run))
         self.assertNotRegex(out, "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]")
         self.assertIn("w1: ok", out)
+    def test_status_clipped_to_200(self):
+        (self.run / "workers").mkdir()
+        (self.run / "workers" / "w1.md").write_text("status: " + "x" * 500 + "\n")
+        st = sb.worker_status(str(self.run / "workers" / "w1.md"))
+        self.assertEqual(st, "x" * 199 + "…")
+        self.assertEqual(len(st), 200)
+
+    def test_symlink_status_not_read(self):
+        (self.run / "workers").mkdir()
+        (self.run / "secret.txt").write_text("TOPSECRET\n")
+        os.symlink(self.run / "secret.txt", self.run / "workers" / "w1.md")
+        out = sb.render(str(self.run))
+        self.assertIn("w1: (not a regular file)", out)
+        self.assertNotIn("TOPSECRET", out)
+
+    def test_fifo_status_does_not_block(self):
+        (self.run / "workers").mkdir()
+        os.mkfifo(self.run / "workers" / "w1.md")
+        self.assertIn("w1: (not a regular file)", sb.render(str(self.run)))
+
+
+    def test_run_over(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        self.assertFalse(sb.run_over(str(self.run), None))
+        self.assertFalse(sb.run_over(str(self.run), os.getpid()))
+        self.assertTrue(sb.run_over(str(self.run), dead.pid))
+        (self.run / "report.md").write_text("done")
+        self.assertTrue(sb.run_over(str(self.run), None))
+
+    def test_main_exits_when_run_over(self):
+        (self.run / "report.md").write_text("done")
+        out = io.StringIO()
+        with mock.patch.object(sb, "CLOSE_DELAY", 0), contextlib.redirect_stdout(out):
+            self.assertEqual(sb.main([str(self.run), str(os.getpid())]), 0)
+        self.assertIn("-- run over; closing in 0 s --", out.getvalue())
+
+    def test_main_usage_errors(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(sb.main([str(self.run), "notapid"]), 2)
+            self.assertEqual(sb.main([]), 2)
 
 if __name__ == "__main__":
     unittest.main()

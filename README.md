@@ -11,7 +11,7 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 3. Workers share a run folder (task board, per-worker notes) and can message each other and the overseer.
 4. The overseer reviews each piece as it finishes and sends fix reports back to the worker that wrote it.
 5. When everything is done, it runs a final review (tests, build, lint, bugs, error handling, code quality, security) and writes a report.
-6. One terminal window per worker shows what that worker is doing, plus one window for the task board. The windows read local files and cost no tokens.
+6. With `y` (see Usage), one terminal window per worker shows what that worker is doing, plus one window for the task board. The windows read local files and cost no tokens. They close themselves when the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. They show what workers print, including the first line of tool output, so a secret a worker prints can appear in a window.
 
 ## Requirements
 
@@ -26,10 +26,12 @@ From the root of this repository:
 
 ```bash
 mkdir -p ~/.claude/skills ~/.claude/agents
-ln -s "$PWD/skills/swarm" ~/.claude/skills/swarm
-ln -s "$PWD/agents/swarm-worker.md" ~/.claude/agents/swarm-worker.md
-ln -s "$PWD/agents/swarm-worker-web.md" ~/.claude/agents/swarm-worker-web.md
+ln -sT "$PWD/skills/swarm" ~/.claude/skills/swarm
+ln -sT "$PWD/agents/swarm-worker.md" ~/.claude/agents/swarm-worker.md
+ln -sT "$PWD/agents/swarm-worker-web.md" ~/.claude/agents/swarm-worker-web.md
 ```
+
+`ln -sT` refuses to create a link when the path already exists, so it never nests inside an existing directory or overwrites anything. To reinstall, run the uninstall line first. The links point into this repository, so keep it where you installed it from.
 
 Start a new Claude Code session afterwards: agent definitions are loaded when a session starts.
 
@@ -40,12 +42,15 @@ The overseer reviews all work, so cheap workers are usually enough: haiku or son
 ## Usage
 
 ```
-Usage: /swarm <workers> <model> <effort> <task...>
+Usage: /swarm <workers> <model> <effort> [windows] <task...>
   workers  1-20
   model    haiku | sonnet | opus | fable
   effort   low | medium | high | xhigh | max
-Example: /swarm 4 sonnet medium add CSV export to the reports page, with tests
+  windows  y | yes | n | no (optional; default no). y opens a terminal window per worker plus a task board
+Example: /swarm 4 sonnet medium y add CSV export to the reports page, with tests
 ```
+
+The windows word is read only right after the effort. A task that itself starts with y, yes, n or no needs the windows word in front of it, for example `/swarm 2 haiku low n no longer log passwords in auth.py`.
 
 To stop a running swarm, tell the overseer to stop. It stops every worker and reports what finished.
 
@@ -56,6 +61,8 @@ The overseer picks one per task:
 - `swarm-worker`: file and shell tools plus messaging. The default, with a small startup context.
 - `swarm-worker-web`: the same plus web fetch and search, for tasks that need online docs.
 - `general-purpose`: only for tasks that need MCP tools or a skill. It loads the full context, so it costs more.
+
+Worker types are guidance on cost and scope, not a security boundary. In auto mode every worker can run shell commands without approval. The file-ownership and no-commit rules are instructions to the workers, not limits that are enforced. A worker that reads hostile text, such as a file or a fetched page, could be steered. Run `/swarm` only in repositories whose content you trust.
 
 ## Run folder
 
@@ -82,3 +89,7 @@ rm ~/.claude/skills/swarm ~/.claude/agents/swarm-worker.md ~/.claude/agents/swar
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

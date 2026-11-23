@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Live, readable view of one /swarm worker's log.
 
-usage: swarm-watch.py <output-file> <name>
+usage: swarm-watch.py <output-file> <name> [<run-folder> <owner-pid>]
+Exits when <run-folder>/report.md appears or <owner-pid> is gone, so its window closes.
 """
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 import time
 
 MAX_LINE = 200
+CLOSE_DELAY = 5  # seconds the last lines stay up before the window closes
 CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # log text is untrusted: no escape sequences to the terminal
 AGENT_MSG = re.compile(r'<agent-message from="([^"]*)">\s*(.*?)\s*</agent-message>', re.S)
 
@@ -120,14 +122,35 @@ def read_meta(log_path):
     return data if isinstance(data, dict) else {}
 
 
-def main(argv):
-    if len(argv) != 2:
-        print("usage: swarm-watch.py <output-file> <name>", file=sys.stderr)
-        return 2
-    path, name = argv
-    meta = read_meta(path)
+def header(name, meta):
     fields = " ".join(f"{k}={meta[k]}" for k in ("model", "effort") if meta.get(k))
-    print(f"== {name}{' | ' + fields if fields else ''} ==", flush=True)
+    return clip(f"== {name}{' | ' + fields if fields else ''} ==")
+
+
+def run_over(run_dir, pid):
+    """True once the overseer wrote report.md or the process that owns the workers is gone."""
+    if run_dir and os.path.exists(os.path.join(run_dir, "report.md")):
+        return True
+    if pid:
+        try:
+            os.kill(pid, 0)  # shortcut: a reused PID keeps the window open; close it by hand then
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+    return False
+
+
+def main(argv):
+    try:
+        if len(argv) not in (2, 4):
+            raise ValueError
+        path, name = argv[:2]
+        run_dir, pid = (argv[2], int(argv[3])) if len(argv) == 4 else (None, None)
+    except ValueError:
+        print("usage: swarm-watch.py <output-file> <name> [<run-folder> <owner-pid>]", file=sys.stderr)
+        return 2
+    print(header(name, read_meta(path)), flush=True)
     reader = LogReader(path)
     announced = False
     try:
@@ -139,8 +162,12 @@ def main(argv):
             if recs:
                 announced = False  # a resumed worker keeps writing the same file
             elif not announced and read_meta(path).get("finished"):
-                print(f"-- {name} finished; window stays open --", flush=True)
+                print(f"-- {name} finished; window closes when the run ends --", flush=True)
                 announced = True
+            if run_over(run_dir, pid):
+                print(f"-- run over; closing in {CLOSE_DELAY} s --", flush=True)
+                time.sleep(CLOSE_DELAY)
+                return 0
             time.sleep(0.5)
     except KeyboardInterrupt:
         return 0

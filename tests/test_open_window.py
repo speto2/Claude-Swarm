@@ -55,6 +55,34 @@ class OpenWindowTest(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertTrue(r.stdout.startswith("Run this to watch: "), r.stdout)
 
+    def stub(self, name, body):
+        path = self.bin / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+
+    def run_stubbed(self, args):
+        for tool in ("bash", "setsid", "sleep"):
+            (self.bin / tool).symlink_to(shutil.which(tool))
+        return subprocess.run([str(self.bin / "bash"), str(SCRIPT), *args],
+                              env={"PATH": str(self.bin), "DISPLAY": ":99"},
+                              capture_output=True, text=True, timeout=10)
+
+    def test_failing_terminal_falls_through_to_next(self):
+        log = self.tmp / "xterm.log"
+        self.stub("xfce4-terminal", "exit 1\n")
+        self.stub("xterm", f'printf \'%s\\n\' "$@" > "{log}"\n')
+        r = self.run_stubbed(["w1 log", "python3", "x y.py", "arg"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(log.read_text().splitlines(),
+                         ["-T", "w1 log", "-e", "python3", "x y.py", "arg"])
+
+    def test_all_terminals_failing_prints_command(self):
+        self.stub("xfce4-terminal", "exit 1\n")
+        self.stub("xterm", "exit 1\n")
+        r = self.run_stubbed(["t", "python3", "x y.py"])
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertTrue(r.stdout.startswith("Run this to watch: "), r.stdout)
+
     def test_usage_error(self):
         r = self.run_script(["only-title"], {"PATH": "/usr/bin:/bin"})
         self.assertEqual(r.returncode, 2)

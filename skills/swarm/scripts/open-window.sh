@@ -29,8 +29,14 @@ for term in xfce4-terminal x-terminal-emulator gnome-terminal konsole kitty xter
     kitty)               args=(--title "$title") ;;
     xterm)               args=(-T "$title" -e) ;;
   esac
-  setsid -f "$term" "${args[@]}" "$@" >/dev/null 2>&1 </dev/null && exit 0
-  break  # setsid missing or fork failed: no point trying other terminals
+  setsid -w "$term" "${args[@]}" "$@" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do  # still alive after ~0.5 s: the window is up
+    sleep 0.05
+    kill -0 "$pid" 2>/dev/null || break
+  done
+  kill -0 "$pid" 2>/dev/null && exit 0
+  wait "$pid" && exit 0  # exited fast: success only if status 0, else try the next terminal
 done
 
 fallback "$@"
