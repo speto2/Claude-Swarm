@@ -41,6 +41,13 @@ class FormatTest(unittest.TestCase):
         self.assertLessEqual(len(lines[0]), 200)
         self.assertTrue(lines[0].endswith("…"))
 
+    def test_strips_terminal_controls(self):
+        rec = {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "hi \x1b]0;pwn\x07\x1b[2J\x9bthere\tok"}]}}
+        line = sw.format_record(rec)[0]
+        self.assertNotRegex(line, "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]")
+        self.assertIn("there\tok", line)
+
     def test_bad_shapes_skipped(self):
         for rec in ({"type": "assistant"},
                     {"type": "assistant", "message": {"content": "str"}},

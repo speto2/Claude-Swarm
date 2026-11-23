@@ -81,7 +81,7 @@ Tasks:
   Interfaces: <pinned names, signatures, formats>
 ```
 
-Spawn with the Agent tool: `subagent_type` = the tier, `model` and `effort` = the user's values. Spawn one worker first. Spawn the rest together in your next message, so they reuse its cached context.
+Spawn with the Agent tool, in the background: `subagent_type` = the tier, `model` and `effort` = the user's values. Spawn one worker first. Spawn the rest together in your next message, so they reuse its cached context.
 
 ## 6. Roster and windows
 

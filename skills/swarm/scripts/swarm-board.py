@@ -4,8 +4,11 @@
 usage: swarm-board.py <run-folder>
 """
 import os
+import re
 import sys
 import time
+
+CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # worker-written text is untrusted: no escape sequences to the terminal
 
 
 def worker_status(path):
@@ -37,7 +40,7 @@ def render(run_dir):
         parts.append(f"{n[:-3]}: {worker_status(os.path.join(wdir, n))}")
     if not names:
         parts.append("(no workers yet)")
-    return "\n".join(parts)
+    return CTRL.sub("", "\n".join(parts))
 
 
 def main(argv):

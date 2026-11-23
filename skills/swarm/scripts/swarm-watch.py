@@ -10,10 +10,12 @@ import sys
 import time
 
 MAX_LINE = 200
+CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # log text is untrusted: no escape sequences to the terminal
 AGENT_MSG = re.compile(r'<agent-message from="([^"]*)">\s*(.*?)\s*</agent-message>', re.S)
 
 
 def clip(line):
+    line = CTRL.sub("", line)
     return line if len(line) <= MAX_LINE else line[:MAX_LINE - 1] + "…"
 
 

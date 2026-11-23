@@ -34,5 +34,13 @@ class BoardTest(unittest.TestCase):
         self.assertIn("(no workers yet)", sb.render(str(self.run)))
 
 
+    def test_render_strips_terminal_controls(self):
+        (self.run / "tasks.md").write_text("| t1 | \x1b[2J |\n")
+        (self.run / "workers").mkdir()
+        (self.run / "workers" / "w1.md").write_text("status: ok \x1b]0;pwn\x07\n")
+        out = sb.render(str(self.run))
+        self.assertNotRegex(out, "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]")
+        self.assertIn("w1: ok", out)
+
 if __name__ == "__main__":
     unittest.main()
