@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Live board for a /swarm run: the task table and each worker's status line.
+"""Live board for a /swarm run: the task table, each worker's status line, and workers whose log went quiet.
 
 usage: swarm-board.py <run-folder> [<owner-pid>]
 Exits when <run-folder>/report.md appears or <owner-pid> is gone, so its window closes.
 """
+import json
 import os
 import re
 import stat
@@ -12,6 +13,7 @@ import time
 
 MAX_LINE = 200  # same cap as swarm-watch.py
 CLOSE_DELAY = 5  # seconds the last view stays up before the window closes
+STALE_AFTER = 120  # seconds without log growth before a running worker is flagged quiet
 CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # worker-written text is untrusted: no escape sequences to the terminal
 
 
@@ -30,6 +32,40 @@ def worker_status(path):
     return "(no status yet)"
 
 
+def roster_logs(run_dir):
+    """{worker: output file} from roster.md; empty until the overseer writes it."""
+    try:
+        with open(os.path.join(run_dir, "roster.md"), errors="replace") as f:
+            rows = [[c.strip() for c in l.strip().strip("|").split("|")] for l in f if l.strip().startswith("|")]
+    except OSError:
+        return {}
+    head = [c.lower() for c in rows[0]] if rows else []
+    if "worker" not in head or "output file" not in head:
+        return {}
+    w, o = head.index("worker"), head.index("output file")
+    return {r[w]: r[o] for r in rows[1:] if len(r) == len(head)}
+
+
+def activity(log, now=None):
+    """' (finished)' or ' (quiet Nm)' for a worker that stopped writing its log; '' while it is active or unknown."""
+    if not log:
+        return ""
+    try:
+        real = os.path.realpath(log)
+        idle = (now or time.time()) - os.stat(real).st_mtime
+    except OSError:
+        return ""
+    meta = os.path.splitext(real)[0] + ".meta.json"
+    try:
+        if stat.S_ISREG(os.lstat(meta).st_mode):
+            with open(meta) as f:
+                if json.load(f).get("finished"):
+                    return " (finished)"
+    except (OSError, ValueError, AttributeError):
+        pass
+    return f" (quiet {int(idle // 60)}m)" if idle >= STALE_AFTER else ""
+
+
 def render(run_dir):
     parts = [f"swarm board: {run_dir}", ""]
     try:
@@ -43,8 +79,9 @@ def render(run_dir):
         names = sorted(n for n in os.listdir(wdir) if n.endswith(".md"))
     except OSError:
         names = []
+    logs = roster_logs(run_dir)
     for n in names:
-        parts.append(f"{n[:-3]}: {worker_status(os.path.join(wdir, n))}")
+        parts.append(f"{n[:-3]}: {worker_status(os.path.join(wdir, n))}{activity(logs.get(n[:-3]))}")
     if not names:
         parts.append("(no workers yet)")
     return CTRL.sub("", "\n".join(parts))
