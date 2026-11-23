@@ -28,7 +28,7 @@ Usage: /swarm <workers> <model> <effort> <task...>
 Example: /swarm 4 sonnet medium add CSV export to the reports page, with tests
 ```
 
-Then run one harmless Bash call (`pwd`), because the permission-mode note can arrive with a tool result. Then:
+If all four are valid, run one harmless Bash call (`pwd`), because the permission-mode note can arrive with a tool result. Then:
 
 - Context shows auto mode active: continue.
 - Context shows another mode: reply exactly this and stop:
