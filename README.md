@@ -12,7 +12,7 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 4. Workers share a run folder (task board, per-worker notes) and can message each other and the overseer.
 5. The overseer reviews each piece as it finishes and sends fix reports back to the worker that wrote it.
 6. When everything is done, it runs a final review (tests, build, lint, bugs, error handling, code quality, security) and writes a report, with the tokens and estimated cost of the overseer, every worker and any helper agent it started during the run.
-7. With `w` (see Usage), one terminal window per worker shows what that worker is doing, plus one window for the task board, which marks a worker that has finished or whose log has been quiet for 2 minutes. The windows read local files and cost no tokens. They close themselves when the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. They show what workers print, including the first line of tool output, so a secret a worker prints can appear in a window.
+7. With `w` (see Usage), one terminal window shows the task strip and a box per worker (status, quiet or finished flag, newest lines). Arrow keys or 1-9 pick a worker, Enter opens its whole log full-screen, Up/Down/PgUp/PgDn/Home/End scroll, End follows new lines again, Esc goes back, q closes the dashboard without stopping the run. It opens maximized where the terminal supports it. It reads local files and costs no tokens. It closes itself 5 s after the run ends (the report is written, also after a stop) or when the Claude Code session running the workers exits. It shows what workers print, so a secret a worker prints can appear in the window.
 
 ## Requirements
 
@@ -20,7 +20,7 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 - Auto mode. Workers run in the background, where nobody can approve a prompt, so `/swarm` refuses to start without it.
 - Python 3 (standard library only)
 - Git is optional. Without it, the review cannot catch a worker editing files outside its tasks.
-- For the windows: Linux with X11 or Wayland and one of xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty or xterm. Without one, the overseer prints the commands to run instead.
+- For the dashboard: Linux with X11 or Wayland and one of xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty or xterm. Without one, the overseer prints the command to run instead.
 
 ## Install
 
@@ -31,7 +31,7 @@ Paste this prompt into Claude Code, from any folder. It clones the repository to
 ```text
 Install the /swarm skill from https://github.com/speto2/Claude-Swarm for me. Do these steps in order and stop at the first problem:
 1. If ~/Claude-Swarm already exists, stop and ask me what to do. Otherwise run: git clone https://github.com/speto2/Claude-Swarm.git ~/Claude-Swarm
-2. Check that python3 is installed and that `claude --version` is 2.1.292 or later. On Linux, also say whether one of these terminals is installed for the optional live windows: xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty, xterm. Report anything missing.
+2. Check that python3 is installed and that `claude --version` is 2.1.292 or later. On Linux, also say whether one of these terminals is installed for the optional live dashboard: xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty, xterm. Report anything missing.
 3. Create ~/.claude/skills and ~/.claude/agents if they are missing. Then create these three symbolic links with `ln -s`, using absolute paths. Check each link path first: if it already exists, do not touch it, stop and tell me.
    - ~/.claude/skills/swarm -> ~/Claude-Swarm/skills/swarm
    - ~/.claude/agents/swarm-worker.md -> ~/Claude-Swarm/agents/swarm-worker.md
@@ -67,18 +67,18 @@ The overseer is usually the biggest cost, not the workers: every step it takes r
 
 ```
 Usage: /swarm [<workers>[w] <model> <effort>] <task...>
-  workers  1-20; add w (as in 4w) to open a terminal window per worker plus a task board
+  workers  1-20; add w (as in 4w) to open a live dashboard window
   model    haiku | sonnet | opus | fable
   effort   low | medium | high | xhigh | max
-Without them: one worker per task, sonnet, medium. Start with w for windows.
+Without them: one worker per task, sonnet, medium. Start with w for the dashboard.
 A task that starts with a number needs the full form.
 Examples: /swarm add CSV export to the reports page, with tests
           /swarm 4w sonnet medium add CSV export to the reports page, with tests
 ```
 
-- `/swarm <task>`: the defaults, no windows.
-- `/swarm w <task>`: the defaults, with windows.
-- `/swarm 4 opus high <task>`: at most 4 workers on opus at high effort; `4w` adds the windows.
+- `/swarm <task>`: the defaults, no dashboard.
+- `/swarm w <task>`: the defaults, with the dashboard.
+- `/swarm 4 opus high <task>`: at most 4 workers on opus at high effort; `4w` adds the dashboard.
 
 The overseer then shows its plan. Reply go to start, describe changes to adjust it, or say stop.
 

@@ -15,18 +15,18 @@ Arguments: `$ARGUMENTS`
 
 ## 1. Validate
 
-- First word a number, optionally followed by `w` (as in `4w`, which opens the windows): the full form `<workers>[w] <model> <effort> <task...>`, with the values in the usage text below.
-- First word exactly `w`: the defaults, with windows; the task follows.
-- Any other first word: the whole line is the task, with the defaults: one worker per task (at most 20), sonnet, medium, no windows.
+- First word a number, optionally followed by `w` (as in `4w`, which opens the dashboard): the full form `<workers>[w] <model> <effort> <task...>`, with the values in the usage text below.
+- First word exactly `w`: the defaults, with the dashboard; the task follows.
+- Any other first word: the whole line is the task, with the defaults: one worker per task (at most 20), sonnet, medium, no dashboard.
 
 If the first word is a number and the rest doesn't fit the full form, or the task is empty, print exactly this and do nothing else:
 
 ```
 Usage: /swarm [<workers>[w] <model> <effort>] <task...>
-  workers  1-20; add w (as in 4w) to open a terminal window per worker plus a task board
+  workers  1-20; add w (as in 4w) to open a live dashboard window
   model    haiku | sonnet | opus | fable
   effort   low | medium | high | xhigh | max
-Without them: one worker per task, sonnet, medium. Start with w for windows.
+Without them: one worker per task, sonnet, medium. Start with w for the dashboard.
 A task that starts with a number needs the full form.
 Examples: /swarm add CSV export to the reports page, with tests
           /swarm 4w sonnet medium add CSV export to the reports page, with tests
@@ -60,13 +60,13 @@ If valid, run one harmless Bash call (`pwd`), because the permission-mode note c
 - Put chains of dependent tasks on one worker, so no worker waits on another.
 - Group same-tier tasks; a worker's tier must cover all of its tasks.
 - Starting briefs hold only tasks that can start now. Hold blocked tasks. When one becomes startable, send it with SendMessage to the best-fitting existing worker; that resumes it if it had finished. Never spawn for it.
-- Names: `w<N>-<slug>`, for example `w1-api`. The slug uses only lowercase letters, digits and hyphens, because names reach window titles and terminals.
+- Names: `w<N>-<slug>`, for example `w1-api`. The slug uses only lowercase letters, digits and hyphens, because names reach the dashboard and terminals.
 
 ## 4. Preview
 
 Show the plan, then end your turn:
 
-- workers, model, effort, windows on or off
+- workers, model, effort, dashboard on or off
 - per task: id, title, worker, tier, files, check, depends; hub files with their pinned lines
 - if this conversation already holds other work, one line: a fresh session would make the run cheaper, because every overseer step re-reads this context
 
@@ -104,19 +104,18 @@ Tasks:
 
 Spawn with the Agent tool, in the background: `subagent_type` = the tier, `model` and `effort` = the chosen values. Spawn one worker first. Spawn the rest together in your next message, so they reuse its cached context. Set spawned tasks to `working`.
 
-## 7. Roster and windows
+## 7. Roster and dashboard
 
 - Write `<run>/roster.md` from the spawn results: `| worker | agent id | model | effort | tasks | output file |`. Add any worker spawned later. Agent IDs and paths stay out of chat.
-- Windows off: skip the rest of this step.
-- Windows on: open them in one Bash call, one line per worker, then the board. Keep `"$PPID"` literal: in that call it is the Claude Code process that runs the workers.
+- Dashboard off: skip the rest of this step.
+- Dashboard on: open the dashboard in one Bash call. Keep `"$PPID"` literal: in that call it is the Claude Code process that runs the workers. It picks up roster rows added later.
 
 ```bash
 B="<base>/scripts"
-bash "$B/open-window.sh" "swarm: w1-api" python3 "$B/swarm-watch.py" "<w1 output_file>" "w1-api" "<run>" "$PPID"
-bash "$B/open-window.sh" "swarm: board" python3 "$B/swarm-board.py" "<run>" "$PPID"
+bash "$B/open-window.sh" "swarm: <run folder name>" python3 "$B/swarm-dash.py" "<run>" "$PPID"
 ```
 
-- Exit 3 means no window could open; relay the printed `Run this to watch:` commands to the user once.
+- Exit 3 means no window could open; relay the printed `Run this to watch:` command to the user once.
 
 ## 8. Wait and review
 
@@ -152,7 +151,7 @@ When every worker task is `done`:
 
 ## 10. Report
 
-Run `python3 "$B/swarm-run.py" cost <run>`. Write `<run>/report.md` last (it closes the windows) and give the same report in chat, under these headings:
+Run `python3 "$B/swarm-run.py" cost <run>`. Write `<run>/report.md` last (it closes the dashboard) and give the same report in chat, under these headings:
 
 - **Result**
 - **Tasks**: per task, worker, status, fix rounds used
