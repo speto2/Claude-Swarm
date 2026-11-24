@@ -1,13 +1,22 @@
 import pathlib
+import re
 import unittest
 
-AGENTS = pathlib.Path(__file__).resolve().parent.parent / "agents"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+AGENTS = ROOT / "agents"
+SKILL_DIR = ROOT / "skills" / "swarm"
+MODELS = {"haiku", "sonnet", "opus", "fable", "inherit"}
+
+
+def read(path):
+    return path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
 def split(path):
     """Return (frontmatter lines, body text) of an agent file."""
-    text = (AGENTS / path).read_text()
-    assert text.startswith("---\n"), path
+    text = read(AGENTS / path)
+    if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+        raise ValueError("no frontmatter in %s" % path)
     front, body = text[4:].split("\n---\n", 1)
     return front.splitlines(), body
 
@@ -34,6 +43,46 @@ class AgentsTest(unittest.TestCase):
             keys = [l.split(":", 1)[0] for l in front]
             self.assertEqual(keys, ["name", "description", "tools", "model"], name)
             self.assertEqual(front[0], "name: " + name)
+            fm = dict(l.split(":", 1) for l in front)
+            self.assertTrue(fm["description"].strip(), name + " description empty")
+            self.assertIn(fm["model"].strip(), MODELS, name)
+
+
+class SkillTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read(SKILL_DIR / "SKILL.md")
+        if not cls.text.startswith("---\n"):
+            raise ValueError("SKILL.md has no frontmatter")
+        parts = cls.text.split("\n---\n", 1)
+        cls.front = parts[0].splitlines()[1:]
+        cls.body = parts[1]
+
+    def test_frontmatter(self):
+        self.assertIn("name: swarm", self.front)
+        self.assertIn("disable-model-invocation: true", self.front)
+
+    def test_scripts_exist(self):
+        # body refers to scripts as "$B/<name>" (B=<base>/scripts) or "scripts/<name>"
+        names = set(re.findall(r"(?:\$B|scripts)/([\w.-]+\.(?:py|sh))", self.body))
+        self.assertTrue({"swarm-run.py", "swarm-dash.py", "open-window.sh"} <= names, names)
+        for n in names:
+            self.assertTrue((SKILL_DIR / "scripts" / n).is_file(), n)
+
+    def test_agent_tiers_exist(self):
+        tiers = set(re.findall(r"`(swarm-worker[\w-]*)`", self.body))
+        self.assertTrue({"swarm-worker", "swarm-worker-web"} <= tiers, tiers)
+        for t in tiers:
+            self.assertTrue((AGENTS / (t + ".md")).is_file(), t)
+
+    def test_usage_block_matches_readme(self):
+        def usage(text):
+            m = re.search(r"^Usage: /swarm.*?\n(?=```)", text, re.M | re.S)
+            self.assertIsNotNone(m)
+            return m.group(0)
+        a, b = usage(self.text), usage(read(ROOT / "README.md"))
+        self.assertIn("Examples:", a)
+        self.assertEqual(a, b)
 
 
 if __name__ == "__main__":

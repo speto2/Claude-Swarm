@@ -2,6 +2,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -22,45 +23,54 @@ class OpenWindowTest(unittest.TestCase):
         return subprocess.run(["bash", str(SCRIPT), *args], env=env,
                               capture_output=True, text=True, timeout=10)
 
-    TOOLS = ("bash", "setsid", "sleep", "true", "readlink", "python3")
+    TOOLS = ("bash", "setsid", "sleep", "true", "readlink", "python3", "mv", "cat")
 
     def fresh_bin(self):
         """Empty bin dir holding only the tools the script itself needs."""
         shutil.rmtree(self.bin)
         self.bin.mkdir()
         for tool in self.TOOLS:
-            (self.bin / tool).symlink_to(shutil.which(tool))
+            real = shutil.which(tool)
+            if real is None:
+                self.skipTest(f"{tool} not installed")
+            (self.bin / tool).symlink_to(real)
 
     def stub(self, name, body):
         path = self.bin / name
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
+    def log_cmd(self, log, text='"$@"', append=False):
+        """Shell snippet: write lines to a temp file next to log, then mv, so a reader never sees a partial log."""
+        tmp, log = shlex.quote(f"{log}.tmp"), shlex.quote(str(log))
+        prev = f"cat {log} 2>/dev/null; " if append else ""
+        return f"{{ {prev}printf '%s\\n' {text}; }} > {tmp} && mv {tmp} {log}\n"
+
     def logger(self, name, append=False):
         log = self.tmp / f"{name}.log"
-        self.stub(name, f'printf \'%s\\n\' "$@" {">>" if append else ">"} "{log}"\n')
+        self.stub(name, self.log_cmd(log, append=append))
         return log
 
-    def run_stubbed(self, args):
+    def wait_for(self, path, timeout=3):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(path.exists(), f"{path.name} never appeared")
+
+    def run_stubbed(self, args, env=None):
         return subprocess.run([str(self.bin / "bash"), str(SCRIPT), *args],
-                              env={"PATH": str(self.bin), "DISPLAY": ":99"},
+                              env={"PATH": str(self.bin), **(env or {"DISPLAY": ":99"})},
                               capture_output=True, text=True, timeout=10)
 
     def test_launches_first_terminal_with_args_intact(self):
-        log = self.tmp / "stub.log"
-        stub = self.bin / "xfce4-terminal"
-        stub.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$STUB_LOG"\n')
-        stub.chmod(0o755)
+        self.fresh_bin()
+        log = self.logger("xfce4-terminal")
         target = f"{self.tmp}/x y.py"
-        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "DISPLAY": ":99", "STUB_LOG": str(log)}
         start = time.monotonic()
-        r = self.run_script(["w1 log", "python3", target, "arg"], env)
+        r = self.run_stubbed(["w1 log", "python3", target, "arg"])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertLess(time.monotonic() - start, 2)
-        deadline = time.monotonic() + 3
-        while not log.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        time.sleep(0.1)  # let the stub finish writing
+        self.wait_for(log)
         self.assertEqual(log.read_text().splitlines(),
                          ["--maximize", "--title=w1 log", "-x", "python3", target, "arg"])
 
@@ -97,7 +107,7 @@ class OpenWindowTest(unittest.TestCase):
         self.fresh_bin()
         log = self.tmp / "xterm.log"
         self.stub("xfce4-terminal", "exit 1\n")
-        self.stub("xterm", f'printf \'%s\\n\' "$@" > "{log}"\n')
+        self.stub("xterm", self.log_cmd(log))
         r = self.run_stubbed(["w1 log", "python3", "x y.py", "arg"])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(log.read_text().splitlines(),
@@ -112,7 +122,7 @@ class OpenWindowTest(unittest.TestCase):
             with self.subTest(target):
                 self.fresh_bin()
                 log = self.tmp / f"{target}.log"
-                (alt / target).write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{log}"\n')
+                (alt / target).write_text("#!/bin/sh\n" + self.log_cmd(log))
                 (alt / target).chmod(0o755)
                 (self.bin / "x-terminal-emulator").symlink_to(alt / target)
                 r = self.run_stubbed(["w1 log", "python3", "x y.py", "arg"])
@@ -129,7 +139,7 @@ class OpenWindowTest(unittest.TestCase):
                 self.fresh_bin()
                 wlog = self.tmp / "wrapper.log"
                 wlog.unlink(missing_ok=True)
-                (alt / f"{real}.wrapper").write_text(f'#!/bin/sh\necho called > "{wlog}"\n')
+                (alt / f"{real}.wrapper").write_text("#!/bin/sh\n" + self.log_cmd(wlog, "called"))
                 (alt / f"{real}.wrapper").chmod(0o755)
                 (self.bin / "x-terminal-emulator").symlink_to(alt / f"{real}.wrapper")
                 log = self.logger(real, append=True)
@@ -155,7 +165,7 @@ class OpenWindowTest(unittest.TestCase):
         (alt / "xfce4-terminal.wrapper").chmod(0o755)
         (self.bin / "x-terminal-emulator").symlink_to(alt / "xfce4-terminal.wrapper")
         log = self.tmp / "count.log"
-        self.stub("xfce4-terminal", f'echo run >> "{log}"\nexit 1\n')
+        self.stub("xfce4-terminal", self.log_cmd(log, "run", append=True) + "exit 1\n")
         self.assertEqual(self.run_stubbed(["t", "python3", "x"]).returncode, 3)
         self.assertEqual(log.read_text().splitlines(), ["run"])
 
@@ -199,7 +209,7 @@ class OpenWindowTest(unittest.TestCase):
         self.fresh_bin()
         calls = self.tmp / "order.log"
         for name in order:
-            self.stub(name, f'echo {name} >> "{calls}"\nexit 1\n')
+            self.stub(name, self.log_cmd(calls, name, append=True) + "exit 1\n")
         self.assertEqual(self.run_stubbed(["t", "python3", "x"]).returncode, 3)
         self.assertEqual(calls.read_text().split(), order)
 
@@ -242,6 +252,45 @@ class OpenWindowTest(unittest.TestCase):
         r = self.run_stubbed(["t", "python3", "x y.py"])
         self.assertEqual(r.returncode, 3, r.stderr)
         self.assertTrue(r.stdout.startswith("Run this to watch: "), r.stdout)
+
+    def test_long_running_terminal_is_detached(self):
+        self.fresh_bin()
+        pidfile = self.tmp / "term.pid"
+        self.stub("xfce4-terminal", self.log_cmd(pidfile, "$$") + "sleep 10\n")
+
+        def reap():
+            try:
+                pid = int(pidfile.read_text())
+            except (OSError, ValueError):
+                return
+            try:
+                os.killpg(pid, signal.SIGKILL)  # setsid made it its own group leader
+            except ProcessLookupError:
+                pass
+            except OSError:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.addCleanup(reap)
+        start = time.monotonic()
+        r = self.run_stubbed(["t", "python3", "x"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.monotonic() - start, 3)
+        self.wait_for(pidfile)
+        os.kill(int(pidfile.read_text()), 0)  # still alive: raises if gone
+
+    def test_wayland_only_still_launches(self):
+        self.fresh_bin()
+        log = self.logger("xfce4-terminal")
+        r = self.run_stubbed(["w1 log", "python3", "x"], env={"WAYLAND_DISPLAY": "wayland-99"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(log.read_text().splitlines(), ["--maximize", "--title=w1 log", "-x", "python3", "x"])
+
+    def test_no_arguments_is_usage_error(self):
+        r = self.run_script([], {"PATH": "/usr/bin:/bin"})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(USAGE, r.stderr)
 
     def test_usage_error(self):
         r = self.run_script(["only-title"], {"PATH": "/usr/bin:/bin"})

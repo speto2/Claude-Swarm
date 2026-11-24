@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+import unicodedata
 import uuid
 from unittest import mock
 
@@ -28,6 +29,24 @@ sr = importlib.util.module_from_spec(run_spec)
 run_spec.loader.exec_module(sr)
 
 FIXTURE = ROOT / "tests" / "fixtures" / "worker-log.jsonl"
+
+
+@contextlib.contextmanager
+def alarm(secs, what):
+    """Fail instead of hanging: the exception is not an OSError, so the code under test cannot swallow it."""
+    class Blocked(Exception):
+        pass
+    def fire(*_):
+        raise Blocked(f"{what} blocked")
+    old = signal.signal(signal.SIGALRM, fire)
+    signal.alarm(secs)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
 ROSTER_HEAD = "| worker | agent id | model | effort | tasks | output file |\n|---|---|---|---|---|---|\n"
 
 
@@ -108,6 +127,24 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(use("WebFetch", {"url": "http://x.test", "prompt": "p"}), ["-> WebFetch: http://x.test"])
         self.assertEqual(use("WebSearch", {"query": "cats"}), ["-> WebSearch: cats"])
         self.assertEqual(use("SendMessage", {"message": "hi"}), ["-> SendMessage to ?: hi"])
+
+    def test_attachment_records(self):
+        def att(a):
+            return sd.format_record({"type": "attachment", "attachment": a})
+        self.assertEqual(att({"type": "queued_command", "prompt": "do it\nmore"}), ["IN: do it"])
+        self.assertEqual(att({"type": "queued_command", "prompt": '<agent-message from="ab">\nhi\n</agent-message>'}), ["MSG from ab: hi"])
+        for other in ({"type": "hook_success", "prompt": "x"}, {"type": "todo_reminder"}, {}, None):
+            self.assertEqual(att(other), [], other)
+        self.assertEqual(sd.format_record({"type": "attachment"}), [])
+
+    def test_tool_result_with_list_content(self):
+        def res(body, **kw):
+            return sd.format_record({"type": "user", "message": {"content": [{"type": "tool_result", "content": body, **kw}]}})
+        self.assertEqual(res([{"type": "text", "text": "\nfirst\nsecond"}, "junk", {"type": "image"}]), ["   <- first"])
+        self.assertEqual(res([{"type": "text", "text": "bad"}], is_error=True), ["   !! bad"])
+        self.assertEqual(res([]), ["   <- "])
+        self.assertEqual(res([{"type": "image"}]), ["   <- "])
+        self.assertEqual(res(None), ["   <- "])
 
     def test_clip_strips_bidi_and_line_separators(self):
         self.assertEqual(sd.clip("a\u202eb\u2066c\u2069d\u2028e\u2029f"), "abcdef")
@@ -275,7 +312,8 @@ class ReaderTest(RunDirTest):
     def test_fifo_status_does_not_block(self):
         (self.run / "workers").mkdir()
         os.mkfifo(self.run / "workers" / "w1.md")
-        self.assertEqual(sd.worker_status(str(self.run / "workers" / "w1.md")), "(not a regular file)")
+        with alarm(3, "worker_status"):
+            self.assertEqual(sd.worker_status(str(self.run / "workers" / "w1.md")), "(not a regular file)")
 
     def test_activity_flags(self):
         log = self.run / "agent-a.jsonl"
@@ -305,6 +343,26 @@ class ReaderTest(RunDirTest):
         (self.run / "secret.json").write_text('{"finished": true}')
         os.symlink(self.run / "secret.json", self.run / "agent-a.meta.json")
         self.assertEqual(sd.activity(str(log), log.stat().st_mtime + 330), " (quiet 5m)")
+
+    def test_activity_ignores_malformed_or_non_dict_meta(self):
+        log, meta = self.run / "agent-a.jsonl", self.run / "agent-a.meta.json"
+        log.write_text("{}\n")
+        os.utime(log, (1000, 1000))
+        for raw in (b"{not json", b"", b"\xff\xfe", b"[]", b'["finished"]', b"null", b"5", b'"finished"', b'{"finished": []}'):
+            meta.write_bytes(raw)
+            os.utime(meta, (1000, 1000))
+            self.assertEqual(sd.activity(str(log), 1030), "", raw)
+            self.assertEqual(sd.activity(str(log), 1330), " (quiet 5m)", raw)
+
+    def test_activity_quiet_boundary(self):
+        log = self.run / "agent-a.jsonl"
+        log.write_text("{}\n")
+        os.utime(log, (1000, 1000))
+        self.assertEqual(sd.activity(str(log), 1000 + sd.STALE_AFTER - 1), "")
+        self.assertEqual(sd.activity(str(log), 1000 + sd.STALE_AFTER), " (quiet 2m)")
+        self.assertEqual(sd.activity(str(log), 1000 + sd.STALE_AFTER - 0.5), "")
+        with mock.patch.object(sd.time, "time", return_value=1000 + sd.STALE_AFTER):  # now=None uses the wall clock
+            self.assertEqual(sd.activity(str(log)), " (quiet 2m)")
 
     def test_activity_flags_quiet_worker_from_roster(self):
         log = self.run / "agent-a.jsonl"
@@ -343,6 +401,11 @@ class ReaderTest(RunDirTest):
 
     def test_parse_table_same_as_swarm_run(self):
         self.assertEqual(inspect.getsource(sd.parse_table), inspect.getsource(sr.parse_table))
+
+    def test_read_roster_duplicate_names_keeps_every_row(self):  # pins current behaviour
+        self.roster(("w1", "haiku", "low", "/tmp/a"), ("w1", "opus", "high", "/tmp/b"))
+        got = sd.read_roster(str(self.run))
+        self.assertEqual([(r["name"], r["model"], r["log"]) for r in got], [("w1", "haiku", "/tmp/a"), ("w1", "opus", "/tmp/b")])
 
     def test_read_roster_missing_or_bad_header(self):
         self.assertEqual(sd.read_roster(str(self.run)), [])
@@ -460,6 +523,16 @@ class LayoutTest(unittest.TestCase):
         self.assertIsNone(sd.scroll(0, "end", 100, 10))
         self.assertIsNone(sd.scroll(89, "down", 100, 10))
         self.assertEqual(sd.visible(lines, 10, 0), lines[:10])
+
+    def test_scroll_when_everything_fits(self):  # total <= height: nothing to scroll, always follow
+        for total in (0, 1, 5, 10):
+            for key in ("up", "down", "pgup", "pgdn", "home", "end", "x"):
+                for top in (None, 0, 3):
+                    self.assertIsNone(sd.scroll(top, key, total, 10), (total, key, top))
+        self.assertEqual(sd.visible(["a", "b"], 10, None), ["a", "b"])
+        self.assertEqual(sd.visible(["a", "b"], 10, 0), ["a", "b"])
+        self.assertEqual(sd.visible([], 10, None), [])
+        self.assertEqual(sd.visible(["a"], 0, None), [])
 
 
 class DashTest(RunDirTest):
@@ -584,6 +657,285 @@ class DashTest(RunDirTest):
         self.assertIsNone(d.closing_at)
 
 
+class DashEdgeTest(RunDirTest):
+    write_log = DashTest.write_log
+
+    def test_poll_log_follows_a_changed_roster_path(self):
+        old, new = self.run / "old.jsonl", self.write_log(3)
+        old.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old 0"}]}}) + "\n")
+        w = sd.Worker("w1", log=str(old))
+        self.assertTrue(w.poll_log())
+        first = w._reader
+        self.assertEqual(w.lines, ["old 0"])
+        w.log = str(new)
+        self.assertTrue(w.poll_log())
+        self.assertIsNot(w._reader, first)
+        self.assertEqual(w._reader.path, str(new))
+        self.assertEqual(w.lines[-3:], ["line 0", "line 1", "line 2"])  # the new log is read from its start
+        with open(old, "a") as f:  # the old file is no longer watched
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old 1"}]}}) + "\n")
+        self.assertFalse(w.poll_log())
+        self.assertNotIn("old 1", w.lines)
+
+    def test_refresh_meta_before_workers_dir_exists(self):
+        self.roster(("w1", "haiku", "low", str(self.run / "none.jsonl")))
+        d = sd.Dash(str(self.run), None)
+        d.refresh_meta()
+        self.assertEqual(d.names(), ["w1"])
+        self.assertEqual(d.workers["w1"].status, "(no status yet)")
+        self.assertEqual(d.selected, "w1")
+        d.poll_logs()
+        self.assertEqual(d.workers["w1"].lines, [])
+
+    def test_refresh_meta_duplicate_roster_names_make_one_worker(self):  # pins current behaviour: the last row's fields win
+        self.roster(("w1", "haiku", "low", "/tmp/a"), ("w2", "m", "e", ""), ("w1", "opus", "high", "/tmp/b"))
+        d = sd.Dash(str(self.run), None)
+        d.refresh_meta()
+        self.assertEqual(d.names(), ["w1", "w2"])
+        self.assertEqual((d.workers["w1"].model, d.workers["w1"].effort, d.workers["w1"].log), ("opus", "high", "/tmp/b"))
+
+
+class FakeScr:
+    """Just enough of a curses window: a grid of cells and, like real curses, an error when the bottom-right cell is written."""
+    def __init__(self, h, w):
+        self.h, self.w = h, w
+        self.erase()
+        self.refreshed = 0
+
+    def erase(self):
+        self.cells = [[" "] * self.w for _ in range(self.h)]  # a wide char's second cell is "", a zero-width mark is appended to the previous cell
+        self.attrs = [[0] * self.w for _ in range(self.h)]
+
+    def getmaxyx(self):
+        return self.h, self.w
+
+    def refresh(self):
+        self.refreshed += 1
+
+    def addstr(self, y, x, text, attr=0):
+        if not (0 <= y < self.h and 0 <= x < self.w):
+            raise curses.error("addstr() returned ERR")
+        for ch in text:
+            zero = unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf")
+            cw = 0 if zero else 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if x + cw > self.w:
+                raise AssertionError(f"text wrapped past the right edge at row {y}: {text!r}")
+            if zero:
+                self.cells[y][x - 1] += ch
+                continue
+            self.cells[y][x] = ch
+            self.attrs[y][x] = attr
+            if cw == 2:
+                self.cells[y][x + 1], self.attrs[y][x + 1] = "", attr
+            x += cw
+            if y == self.h - 1 and x >= self.w:
+                raise curses.error("addstr() returned ERR")  # the character is written, then curses fails to move the cursor
+
+    def row(self, y):
+        return "".join(self.cells[y]).rstrip()
+
+
+def dash_with(names=(), tasks_=(), **fields):
+    d = sd.Dash("x", None)
+    d.workers = {n: sd.Worker(n) for n in names}
+    d._order = list(names)
+    d.tasks = list(tasks_)
+    for n in names:
+        d.workers[n].status = "s-" + n
+    d.selected = names[0] if names else None
+    for k, v in fields.items():
+        setattr(d, k, v)
+    return d
+
+
+class ScreenTest(unittest.TestCase):
+    def test_fit_wide_combining_and_zero_width(self):
+        self.assertEqual(sd.fit("日本語", 4), "日本")
+        self.assertEqual(sd.fit("日本語", 5), "日本")  # a wide char never straddles the edge
+        self.assertEqual(sd.fit("日本語", 1), "")
+        self.assertEqual(sd.fit("日本", 5, pad=True), "日本 ")
+        self.assertEqual(sd.fit("日", 1, pad=True), " ")
+        self.assertEqual(sd.fit("Ａb", 2), "Ａ")  # fullwidth latin counts 2
+        self.assertEqual(sd.fit("日\u0301本", 2), "日\u0301")  # a mark after a wide char costs nothing
+        self.assertEqual(sd.fit("ab\u0301", 2), "ab\u0301")  # ...and is kept even at the edge
+        self.assertEqual(sd.fit("a\u200db", 2), "a\u200db")  # zero-width joiner
+        self.assertEqual(sd.fit("\u200b\u0301", 3, pad=True), "   ")  # nothing but marks: all dropped, padding keeps the width
+        self.assertEqual(sd.fit("", 3, pad=True), "   ")
+        self.assertEqual(sd.fit("abc", 0), "")
+        self.assertEqual(sd.fit("abc", 0, pad=True), "")
+        self.assertEqual(sd.fit("abc", -2, pad=True), "")
+
+    def test_put_clips_by_cells_and_pads_when_reversed(self):
+        scr = FakeScr(3, 10)
+        sd.put(scr, 0, 0, "日本語日本語")
+        self.assertEqual(scr.row(0), "日本語日本")
+        self.assertEqual(scr.cells[0][:3], ["日", "", "本"])
+        sd.put(scr, 1, 2, "ab", curses.A_REVERSE)
+        self.assertEqual("".join(scr.cells[1]), "  ab      ")
+        self.assertEqual(scr.attrs[1], [0, 0] + [curses.A_REVERSE] * 8)  # reverse video is padded to the right edge
+        sd.put(scr, 2, 0, "x\u0301yz", maxw=2)
+        self.assertEqual(scr.cells[2][:3], ["x\u0301", "y", " "])
+
+    def test_put_ignores_off_screen_and_cleans_text(self):
+        scr = FakeScr(3, 10)
+        for y, x, maxw in ((-1, 0, None), (3, 0, None), (0, 10, None), (0, -1, None), (0, 0, 0), (0, 0, -3)):
+            sd.put(scr, y, x, "zzz", 0, maxw)
+        self.assertEqual([scr.row(i) for i in range(3)], ["", "", ""])
+        sd.put(scr, 0, 0, "a\tb\nc\x1b[2Jd\u202e")
+        self.assertEqual(scr.row(0), "a b c[2Jd")  # tab and newline become spaces; ESC and bidi marks are removed
+        sd.put(scr, 1, 8, "abcdef")
+        self.assertEqual(scr.row(1), " " * 8 + "ab")
+
+    def test_put_swallows_error_on_bottom_right_cell(self):
+        scr = FakeScr(3, 10)
+        with self.assertRaises(curses.error):  # the fake really behaves like curses
+            scr.addstr(2, 0, "x" * 10)
+        sd.put(scr, 2, 0, "y" * 20)
+        self.assertEqual(scr.row(2), "y" * 10)
+        sd.put(scr, 2, 9, "z")
+        sd.put(scr, 2, 0, "w", curses.A_REVERSE)  # padded to the corner too
+        self.assertEqual("".join(scr.cells[2]), "w" + " " * 9)
+        sd.put(scr, 2, 8, "日")  # a wide char ending exactly in the corner
+        self.assertEqual(scr.cells[2][8], "日")
+
+    def test_title(self):
+        w = sd.Worker("w1", "haiku", "low")
+        self.assertEqual(sd.title(w), "w1 | haiku low")
+        self.assertEqual(sd.title(sd.Worker("w1")), "w1")
+        self.assertEqual(sd.title(sd.Worker("w1", model="opus")), "w1 | opus")
+        self.assertEqual(sd.title(sd.Worker("w1", effort="high")), "w1 | high")
+
+    def test_closing_text(self):
+        d = dash_with()
+        self.assertEqual(sd.closing_text(d, 100), "")
+        d.closing_at = 105
+        self.assertEqual(sd.closing_text(d, 100), "run over; closing in 5 s")
+        self.assertEqual(sd.closing_text(d, 100.2), "run over; closing in 5 s")  # rounds up
+        self.assertEqual(sd.closing_text(d, 104.9), "run over; closing in 1 s")
+        self.assertEqual(sd.closing_text(d, 105), "run over; closing in 0 s")
+        self.assertEqual(sd.closing_text(d, 200), "run over; closing in 0 s")  # never negative
+
+    def test_layout_empty_and_narrow(self):
+        self.assertEqual(sd.layout(dash_with(), 30, 80), ([], 0, 30, None))  # no workers: no grid shape
+        d = dash_with(["a", "b", "c", "d", "e"])
+        self.assertEqual(sd.layout(d, 10, 40), ([], 0, 10, None))  # boxes would be too small: collapsed list
+        self.assertEqual(sd.layout(d, 3, 80)[3], None)
+        strip, top, body, shape = sd.layout(dash_with(["a"]), 30, 80)
+        self.assertEqual((strip, top, body, shape), ([], 0, 30, (1, 1)))
+
+    def test_layout_with_tasks_and_closing(self):
+        d = dash_with(["a", "b"], tasks(3))
+        strip, top, body, shape = sd.layout(d, 30, 80)
+        self.assertEqual((len(strip), top, body), (3, 4, 26))
+        self.assertIsNotNone(shape)
+        d.closing_at = 1
+        strip, top, body, _ = sd.layout(d, 30, 80)
+        self.assertEqual((len(strip), top, body), (3, 5, 25))  # the banner takes the first row
+        self.assertEqual(sd.layout(d, 3, 80)[:3], ([], 2, 1))  # a tiny window: the banner pushes the strip out
+
+    def draw(self, d, h, w, now=100):
+        scr = FakeScr(h, w)
+        sd.draw(scr, d, now)
+        self.assertEqual(scr.refreshed, 1)
+        return scr
+
+    def test_draw_small_window_only_asks_to_enlarge(self):
+        for h, w in ((sd.MIN_H - 1, 80), (24, sd.MIN_W - 1)):
+            scr = self.draw(dash_with(["a"], tasks(2)), h, w)
+            self.assertEqual(scr.row(0), "enlarge the window"[:w])
+            self.assertEqual([scr.row(i) for i in range(1, h)], [""] * (h - 1))
+
+    def test_draw_empty_workers_and_tasks(self):
+        scr = self.draw(dash_with(), 12, 50)
+        self.assertEqual(scr.row(0), "(no workers yet)")  # no strip, so no separator row either
+        self.assertEqual(scr.row(1), "")
+        scr = self.draw(dash_with(tasks_=tasks(2)), 12, 50)
+        self.assertIn("t1 w1-api", scr.row(0))
+        self.assertEqual(scr.row(2), "-" * 50)
+        self.assertEqual(scr.row(3), "(no workers yet)")
+
+    def test_draw_grid_boxes(self):
+        d = dash_with(["w1", "w2"], tasks(1))
+        d.workers["w1"].model, d.workers["w1"].flag = "haiku", " (quiet 3m)"
+        d.workers["w1"].lines = [f"line {i}" for i in range(40)]
+        scr = self.draw(d, 24, 80)
+        self.assertEqual(scr.row(1), "-" * 80)
+        self.assertTrue(scr.row(2).startswith("w1 | haiku"))
+        self.assertEqual(scr.attrs[2][0], curses.A_REVERSE)  # selected
+        self.assertEqual(scr.attrs[2][41], curses.A_BOLD)  # unselected second box
+        self.assertIn("s-w1 (quiet 3m)", scr.row(3))
+        self.assertIn("line 39", "".join(scr.row(y) for y in range(24)))
+        self.assertNotIn("line 0 ", "".join(scr.row(y) for y in range(24)) + " ")
+
+    def test_draw_narrow_collapsed_list_mode(self):
+        names = [f"w{i}" for i in range(30)]
+        d = dash_with(names, selected="w20")
+        d.workers["w3"].flag = " (finished)"
+        self.assertIsNone(sd.layout(d, 12, 40)[3])
+        scr = self.draw(d, 12, 40)
+        shown = [scr.row(y) for y in range(12)]
+        self.assertIn("w20: s-w20", shown)
+        reversed_rows = [y for y in range(12) if scr.attrs[y][0] == curses.A_REVERSE]
+        self.assertEqual([shown[y] for y in reversed_rows], ["w20: s-w20"])
+        self.assertNotIn("w0: s-w0", shown)  # window scrolled to keep the selection visible
+        d.selected = "w3"
+        self.assertIn("w3: s-w3 (finished)", [self.draw(d, 12, 40).row(y) for y in range(12)])
+
+    def test_draw_list_mode_writing_the_bottom_right_cell(self):
+        d = dash_with(["a", "b", "c", "d", "e"], selected="e")
+        d.workers["e"].status = "x" * 100
+        scr = self.draw(d, 10, 40)  # the selected last row is padded to the corner; curses.error must not escape
+        self.assertEqual(scr.row(4), "e: " + "x" * 37)
+
+    def test_draw_corner_cell_in_grid_and_zoom(self):
+        d = dash_with(["w1"])
+        d.workers["w1"].lines = ["y" * 300] * 40
+        self.draw(d, 24, 80)
+        d.zoom = "w1"
+        scr = self.draw(d, 24, 80)
+        self.assertEqual(scr.row(23), "y" * 80)
+
+    def test_draw_zoomed_follows_newest_or_scrolls(self):
+        d = dash_with(["w1"])
+        w = d.workers["w1"]
+        w.model, w.flag, w.lines = "haiku", " (quiet 2m)", [f"line {i}" for i in range(50)]
+        d.zoom = "w1"
+        scr = self.draw(d, 12, 60)
+        self.assertEqual(scr.row(0), "w1 | haiku | s-w1 (quiet 2m)")
+        self.assertEqual(scr.attrs[0], [curses.A_REVERSE] * 60)
+        self.assertEqual([scr.row(y) for y in (1, 11)], ["line 39", "line 49"])  # top None: the newest 11 lines
+        d.top = 5
+        scr = self.draw(d, 12, 60)
+        self.assertEqual([scr.row(y) for y in (1, 11)], ["line 5", "line 15"])
+        d.top = 45  # near the end: fewer lines than rows, rest blank
+        scr = self.draw(d, 12, 60)
+        self.assertEqual([scr.row(y) for y in (1, 5, 6)], ["line 45", "line 49", ""])
+        d.top = scroll_to = sd.scroll(None, "up", 50, 11)
+        self.assertEqual(self.draw(d, 12, 60).row(1), f"line {scroll_to}")
+
+    def test_draw_zoomed_short_log_and_unknown_zoom(self):
+        d = dash_with(["w1"])
+        d.workers["w1"].lines = ["only"]
+        d.zoom = "w1"
+        scr = self.draw(d, 12, 60)
+        self.assertEqual((scr.row(1), scr.row(2)), ("only", ""))
+        d.zoom = "gone"  # a zoom on a vanished worker falls back to the grid
+        self.assertIn("w1", self.draw(d, 12, 60).row(0))
+
+    def test_draw_closing_banner(self):
+        d = dash_with(["w1"], tasks(1), closing_at=104)
+        scr = self.draw(d, 24, 80, now=100)
+        self.assertEqual(scr.row(0), "run over; closing in 4 s")
+        self.assertEqual(scr.attrs[0][0], curses.A_BOLD)
+        self.assertIn("t1 w1-api", scr.row(1))
+        self.assertEqual(scr.row(2), "-" * 80)
+        d.zoom = "w1"
+        self.assertEqual(self.draw(d, 24, 80, now=103).row(0), "w1 | s-w1  run over; closing in 1 s")
+        d = dash_with(["w1"], closing_at=104)  # no tasks: banner alone, then the separator
+        scr = self.draw(d, 24, 80, now=100)
+        self.assertEqual((scr.row(0), scr.row(1)), ("run over; closing in 4 s", "-" * 80))
+
+
 class UiTest(RunDirTest):
     def test_main_usage_errors(self):
         for argv in ([], ["a", "b", "c"], ["run", "notapid"], ["run", "0"], ["run", "-1"]):
@@ -662,8 +1014,9 @@ class TmuxTest(RunDirTest):
         self.status("w1-api", "status: writing api\n")
         self.sock = f"swarmdash-{uuid.uuid4().hex[:8]}"
         self.addCleanup(subprocess.run, ["tmux", "-L", self.sock, "kill-server"], capture_output=True)
-        self.tmux("new-session", "-d", "-x", "160", "-y", "45", "-s", "d",
-                  shlex.join([sys.executable, str(SCRIPT), str(self.run)]))
+        made = self.tmux("new-session", "-d", "-x", "160", "-y", "45", "-s", "d",
+                         shlex.join([sys.executable, str(SCRIPT), str(self.run)]))
+        self.assertEqual(made.returncode, 0, made.stderr)
 
     def tmux(self, *args):
         return subprocess.run(["tmux", "-L", self.sock, *args], capture_output=True, text=True)
@@ -672,16 +1025,16 @@ class TmuxTest(RunDirTest):
         return self.tmux("capture-pane", "-p", "-t", "d").stdout
 
     def wait(self, text, secs=5):
-        end = time.time() + secs
-        while time.time() < end:
+        end = time.monotonic() + secs
+        while time.monotonic() < end:
             if text in self.cap():
                 return
             time.sleep(0.1)
         self.fail(f"{text!r} not on screen:\n{self.cap()}")
 
     def gone(self, secs):
-        end = time.time() + secs
-        while time.time() < end:
+        end = time.monotonic() + secs
+        while time.monotonic() < end:
             if self.tmux("has-session", "-t", "d").returncode != 0:
                 return True
             time.sleep(0.1)
@@ -703,7 +1056,7 @@ class TmuxTest(RunDirTest):
         self.wait("w1-api | haiku low")
         (self.run / "report.md").write_text("done")
         self.wait("closing in")
-        self.assertTrue(self.gone(8), self.cap())
+        self.assertTrue(self.gone(12), self.cap())
 
     def test_ctrl_c_exits(self):
         self.wait("w1-api")

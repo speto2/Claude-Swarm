@@ -83,8 +83,8 @@ class GitRunTest(TempDirTest):
 
     def test_second_init_same_second_gets_own_folder(self):
         with mock.patch.object(sr.time, "strftime", return_value=pathlib.Path(self.run_dir).name):
-            code, out, _ = run_main(["init"], TABLE)
-        self.assertEqual(code, 0)
+            code, out, err = run_main(["init"], TABLE)
+        self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), self.run_dir + "-2")
 
     def test_diff_shows_every_kind_of_change(self):
@@ -94,8 +94,8 @@ class GitRunTest(TempDirTest):
         (self.root / "other.py").write_text("x = 2\n")
         (self.root / "dirty.txt").write_text("v3\n")
         (self.root / "hub.py").write_text("ROUTES = ['csv']\n")  # a worker touched main's hub file
-        code, out, _ = run_main(["diff", self.run_dir, "t1"])
-        self.assertEqual(code, 0)
+        code, out, err = run_main(["diff", self.run_dir, "t1"])
+        self.assertEqual(code, 0, err)
         self.assertIn("== src/api.py: modified (+1 -1)", out)
         self.assertIn("+    return 2", out)
         self.assertIn("== src/new.py: new (+1 -0)", out)
@@ -103,28 +103,75 @@ class GitRunTest(TempDirTest):
         self.assertIn("CHANGED IN OTHER TASKS' FILES: docs/a b.md (t2 pending)", out)
         self.assertIn("CHANGED IN main's FILES: hub.py", out)
         self.assertIn("CHANGED OUTSIDE EVERY TASK: dirty.txt, other.py", out)
-        code, out, _ = run_main(["diff", self.run_dir])
+        code, out, err = run_main(["diff", self.run_dir])
+        self.assertEqual(code, 0, err)
         self.assertIn("== docs/a b.md: modified (+1 -1)", out)
         self.assertIn("-dirty before", out)
         self.assertIn("== hub.py: modified (+1 -1)", out)
         self.assertNotIn("CHANGED IN main's FILES", out)  # the final review diffs everything, hub edits included
 
     def test_diff_when_nothing_changed(self):
-        code, out, _ = run_main(["diff", self.run_dir])
-        self.assertEqual(code, 0)
+        code, out, err = run_main(["diff", self.run_dir])
+        self.assertEqual(code, 0, err)
         self.assertIn("unchanged: src/api.py, src/new.py, docs/a b.md, hub.py", out)
-        self.assertNotIn("CHANGED IN main's FILES", run_main(["diff", self.run_dir, "t1"])[1])
+        code, t1_out, err = run_main(["diff", self.run_dir, "t1"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("CHANGED IN main's FILES", t1_out)
         self.assertIn("nothing changed outside the tasks' files", out)
 
     def test_diff_binary_and_cap(self):
         (self.root / "src" / "new.py").write_bytes(b"\x00\x01")
         (self.root / "src" / "api.py").write_text("".join(f"line {i}\n" for i in range(50)))
         with mock.patch.object(sr, "MAX_DIFF_LINES", 10):
-            _, out, _ = run_main(["diff", self.run_dir, "t1"])
+            code, out, err = run_main(["diff", self.run_dir, "t1"])
+        self.assertEqual(code, 0, err)
         self.assertIn("== src/new.py: new, binary", out)
         self.assertIn("[not shown: over the 10-line cap]", out)
         self.assertIn("NOT SHOWN, read these directly: src/api.py", out)
         self.assertNotIn("line 49", out)
+
+    def test_diff_of_a_deleted_owned_file(self):
+        (self.root / "src" / "api.py").unlink()
+        code, out, err = run_main(["diff", self.run_dir, "t1"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("== src/api.py: deleted (+0 -2)", out)
+        self.assertIn("-def a():", out)
+        self.assertIn("unchanged: src/new.py", out)
+
+    def test_dirty_files_deleted_outside_the_owned_set(self):
+        (self.root / "other.py").unlink()
+        self.assertIsNone(sr.dirty_files(str(self.root))["other.py"])
+        code, out, err = run_main(["diff", self.run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("CHANGED OUTSIDE EVERY TASK: other.py", out)
+
+    def test_dirty_files_rename_reports_both_paths(self):
+        git(self.root, "mv", "other.py", "moved.py")
+        (self.root / "moved.py").write_text("x = 1\ny = 2\n")
+        now = sr.dirty_files(str(self.root))
+        self.assertEqual(now["moved.py"], sr.file_hash(self.root / "moved.py"))
+        self.assertIn("other.py", now)  # the rename source is a deletion, not swallowed
+        self.assertIsNone(now["other.py"])
+        self.assertEqual(sorted(now), ["dirty.txt", "docs/a b.md", "moved.py", "other.py"])
+        code, out, err = run_main(["diff", self.run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertIn("CHANGED OUTSIDE EVERY TASK: moved.py, other.py", out)
+
+    def test_dirty_files_copy_does_not_swallow_the_next_entry(self):
+        git(self.root, "config", "status.renames", "copies")
+        lines = "".join(f"line {i}\n" for i in range(20))
+        (self.root / "big.py").write_text(lines)
+        git(self.root, "add", "big.py")
+        git(self.root, "commit", "-qm", "big")
+        (self.root / "big.py").write_text(lines + "more\n")
+        (self.root / "copy.py").write_text(lines + "more\nextra\n")
+        git(self.root, "add", "big.py", "copy.py")
+        (self.root / "zzz.txt").write_text("untracked\n")  # sorts after the copy entry
+        self.assertIn(b"C  copy.py\0big.py\0", sr.git(str(self.root), "status", "--porcelain", "-z").stdout)
+        now = sr.dirty_files(str(self.root))
+        self.assertEqual(sorted(now), ["big.py", "copy.py", "dirty.txt", "docs/a b.md", "zzz.txt"])
+        self.assertIsNotNone(now["big.py"])
+        self.assertIsNotNone(now["copy.py"])
 
     def test_diff_unknown_task(self):
         code, _, err = run_main(["diff", self.run_dir, "t9"])
@@ -172,11 +219,12 @@ class NoGitRunTest(TempDirTest):
     def test_init_and_diff_without_git(self):
         (self.root / "src" / "api.py").write_text("v1\n")
         os.chdir(self.root)
-        code, out, _ = run_main(["init"], "| id | files |\n| t1 | src/api.py, src/new.py |\n")
-        self.assertEqual(code, 0)
+        code, out, err = run_main(["init"], "| id | files |\n| t1 | src/api.py, src/new.py |\n")
+        self.assertEqual(code, 0, err)
         run = out.strip()
         (self.root / "src" / "api.py").write_text("v2\n")
-        code, out, _ = run_main(["diff", run])
+        code, out, err = run_main(["diff", run])
+        self.assertEqual(code, 0, err)
         self.assertIn("== src/api.py: modified (+1 -1)", out)
         self.assertIn("no git: changes outside the tasks' files are not checked", out)
 
@@ -509,6 +557,56 @@ class CostRunsTest(CostTest):
         for line in out.splitlines():
             if line.startswith("| other"):
                 self.assertEqual(len(sr.CELL_SPLIT.split(line.strip().strip("|"))), 8)
+
+    def test_cost_session_log_without_swarm_command(self):
+        (self.base / "projects" / "p" / "sess.jsonl").write_text("")
+        code, out, err = run_main(["cost", str(self.run_dir)])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("| overseer", out)
+        self.assertIn("Overseer not counted: no /swarm command found", out)
+        self.assertNotIn("Overseer share", out)
+        self.assertIn("| w1-api |", out)
+
+    def test_cost_without_roster(self):
+        (self.run_dir / "roster.md").unlink()
+        code, out, err = run_main(["cost", str(self.run_dir)])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("no readable worker log", err)
+
+
+class TallyBranchesTest(unittest.TestCase):
+    def test_message_id_none_counts_each_record(self):
+        t = sr.tally([rec("assistant", "t", mid=None, model="claude-opus-5-5", usage=usage(1, 0, 0, 1))] * 3)
+        self.assertEqual((t["requests"], t["input"], t["output"]), (3, 3, 3))
+
+    def test_one_hour_cache_write_is_clamped_to_the_total_write(self):
+        u = usage(0, 1000, 0, 0)
+        u["cache_creation"]["ephemeral_1h_input_tokens"] = 5000  # more than was written
+        t = sr.tally([rec("assistant", "t", mid="m", model="claude-opus-5-5", usage=u)])
+        self.assertAlmostEqual(t["usd"], 1000 * sr.WRITE_1H * 4.0 / 1e6)  # all 1000 at the 1h rate, none at a negative 5m rate
+
+    def test_dated_model_id_prices_like_the_undated_one(self):
+        def tallied(model):
+            return sr.tally([rec("assistant", "t", mid="m", model=model, usage=usage(100, 200, 300, 400, w1h=50))])
+        dated = tallied("claude-sonnet-5-5-20250929")
+        self.assertFalse(dated["unpriced"])
+        self.assertGreater(dated["usd"], 0)
+        self.assertEqual(dated["usd"], tallied("claude-sonnet-5-5")["usd"])
+
+
+class CliSmokeTest(TempDirTest):
+    def test_init_as_a_subprocess(self):
+        git(self.root, "init", "-q")
+        (self.root / "src" / "api.py").write_text("v1\n")
+        script = ROOT / "skills" / "swarm" / "scripts" / "swarm-run.py"
+        r = subprocess.run([sys.executable, str(script), "init"], cwd=self.root, input=TABLE, capture_output=True, text=True,
+                           env={**os.environ, "GIT_CEILING_DIRECTORIES": str(self.base)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run = pathlib.Path(r.stdout.strip())
+        self.assertTrue(run.is_dir(), r.stdout)
+        self.assertEqual((run / "tasks.md").read_text(), TABLE)
+        self.assertEqual(run.parent.parent, self.root.resolve() / ".swarm")
 
 
 if __name__ == "__main__":

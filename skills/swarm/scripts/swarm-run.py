@@ -157,7 +157,10 @@ def dirty_files(root):
             continue
         xy, path = entry[:2], entry[3:]
         if "R" in xy or "C" in xy:
-            i += 1  # with -z the rename or copy source is the next field
+            src = parts[i] if i < len(parts) else ""  # with -z the rename or copy source is the next field
+            i += 1
+            if "R" in xy and src and not (src == ".swarm" or src.startswith(".swarm/")):
+                out[src] = file_hash(os.path.join(root, src))  # a renamed-away file is gone (None); a copy's source is untouched
         if path == ".swarm" or path.startswith(".swarm/"):
             continue
         out[path] = file_hash(os.path.join(root, path))
