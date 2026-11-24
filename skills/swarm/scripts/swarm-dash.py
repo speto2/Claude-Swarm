@@ -100,8 +100,8 @@ class LogReader:
         self.path = path
         self.pos = 0
         self.buf = b""
-        self.ident = None  # (st_dev, st_ino) of the file last read
-        self.truncated = False  # set by read_new when the file shrank or was replaced and reading restarted
+        self.tail = b""  # last bytes read, re-read each poll: a mismatch means the file was cut or rewritten
+        self.truncated = False  # set by read_new when the file shrank or was rewritten and reading restarted
 
     def read_new(self):
         self.truncated = False
@@ -111,15 +111,16 @@ class LogReader:
                 st = os.fstat(f.fileno())
                 if not stat.S_ISREG(st.st_mode):  # FIFO or device: never a worker log
                     return []
-                ident = (st.st_dev, st.st_ino)
-                if st.st_size < self.pos or (self.ident is not None and ident != self.ident):
-                    self.pos, self.buf, self.truncated = 0, b"", True  # shortcut: a log truncated and regrown past pos within one poll goes unnoticed
-                self.ident = ident
+                if self.tail:
+                    f.seek(self.pos - len(self.tail))
+                    if f.read(len(self.tail)) != self.tail:  # short read past a cut end, or new bytes: start over
+                        self.pos, self.buf, self.tail, self.truncated = 0, b"", b"", True
                 f.seek(self.pos)
                 data = f.read()
         except OSError:
             return []
         self.pos += len(data)
+        self.tail = (self.tail + data)[-256:]
         *lines, self.buf = (self.buf + data).split(b"\n")
         out = []
         for line in lines:

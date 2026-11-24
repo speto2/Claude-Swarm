@@ -135,6 +135,15 @@ class ReaderTest(RunDirTest):
         self.assertEqual([x["n"] for x in r.read_new()], [2, 3])
         self.assertTrue(r.truncated)
 
+    def test_reader_restarts_after_in_place_rewrite_past_pos(self):
+        self.append('{"type":"user","n":1}\n')
+        r = sd.LogReader(str(self.path))
+        self.assertEqual(len(r.read_new()), 1)
+        with open(self.path, "w") as f:  # same inode, truncated then regrown past the old position
+            f.write('{"type":"user","n":2}\n{"type":"user","n":3}\n')
+        self.assertEqual([x["n"] for x in r.read_new()], [2, 3])
+        self.assertTrue(r.truncated)
+
     def test_worker_drops_lines_after_truncation(self):
         self.append('{"type":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n')
         w = sd.Worker("w", log=str(self.path))
