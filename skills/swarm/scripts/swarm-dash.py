@@ -4,7 +4,6 @@
 usage: swarm-dash.py <run-folder> [<owner-pid>]
 Exits when <run-folder>/report.md appears or <owner-pid> is gone, so its window closes.
 """
-import collections
 import curses
 import itertools
 import json
@@ -19,7 +18,6 @@ import unicodedata
 MAX_LINE = 200
 CLOSE_DELAY = 5  # seconds the last view stays up before the window closes
 STALE_AFTER = 120  # seconds without log growth before a running worker is flagged quiet
-MAX_STORED = 20000  # formatted lines kept per worker
 MIN_BOX_W, MIN_BOX_H = 30, 4  # smaller boxes collapse to one line per worker
 MIN_W, MIN_H = 40, 10  # smaller windows only ask to be enlarged
 CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # worker-written text is untrusted: no escape sequences to the terminal
@@ -105,7 +103,10 @@ class LogReader:
 
     def read_new(self):
         try:
-            with open(self.path, "rb") as f:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)  # roster paths are untrusted: a FIFO would block open() forever
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):  # FIFO or device: never a worker log
+                    return []
                 f.seek(self.pos)
                 data = f.read()
         except OSError:
@@ -121,16 +122,6 @@ class LogReader:
             if isinstance(rec, dict):
                 out.append(rec)
         return out
-
-
-def read_meta(log_path):
-    meta = os.path.splitext(os.path.realpath(log_path))[0] + ".meta.json"
-    try:
-        with open(meta) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def worker_status(path):
@@ -223,7 +214,7 @@ def read_roster(run_dir):
 class Worker:
     def __init__(self, name, model="", effort="", log=""):
         self.name, self.model, self.effort, self.log = name, model, effort, log
-        self.lines = collections.deque(maxlen=MAX_STORED)  # shortcut: oldest lines drop past 20,000; zoom then starts at the oldest kept
+        self.lines = []  # shortcut: the whole formatted log stays in memory (200 chars a line at most); cap it if runs reach millions of lines
         self.status = "(no status yet)"
         self.flag = ""
         self._reader = None

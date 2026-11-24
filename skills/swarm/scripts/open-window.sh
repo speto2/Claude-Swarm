@@ -21,13 +21,18 @@ fallback() {
 
 for term in xfce4-terminal x-terminal-emulator gnome-terminal konsole kitty xterm; do
   command -v "$term" >/dev/null 2>&1 || continue
-  case $term in
+  name=$term
+  if [ "$term" = x-terminal-emulator ]; then  # Debian alternatives link: use its target's flags
+    name=$(readlink -f "$(command -v "$term")")
+    name=${name##*/}
+  fi
+  case $name in
     xfce4-terminal)      args=(--maximize --title "$title" -x) ;;
-    x-terminal-emulator) args=(-T "$title" -e) ;;
     xterm)               args=(-maximized -T "$title" -e) ;;
     gnome-terminal)      args=(--maximize --title "$title" --) ;;
     konsole)             args=(-p "tabtitle=$title" -e) ;;  # no maximize flag, only --fullscreen
     kitty)               args=(--start-as=maximized --title "$title") ;;
+    *)                   args=(-T "$title" -e) ;;  # x-terminal-emulator pointing at another terminal
   esac
   setsid -w "$term" "${args[@]}" "$@" >/dev/null 2>&1 </dev/null &
   pid=$!

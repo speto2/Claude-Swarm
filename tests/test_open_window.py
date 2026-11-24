@@ -76,6 +76,23 @@ class OpenWindowTest(unittest.TestCase):
         self.assertEqual(log.read_text().splitlines(),
                          ["-maximized", "-T", "w1 log", "-e", "python3", "x y.py", "arg"])
 
+    def test_x_terminal_emulator_args_follow_its_target(self):
+        alt = self.tmp / "alt"
+        alt.mkdir()
+        cases = {"xterm": ["-maximized", "-T", "w1 log", "-e"], "lxterminal": ["-T", "w1 log", "-e"]}
+        for target, flags in cases.items():
+            with self.subTest(target):
+                for tool in ("x-terminal-emulator", "readlink", "bash", "setsid", "sleep"):
+                    (self.bin / tool).unlink(missing_ok=True)
+                log = self.tmp / f"{target}.log"
+                (alt / target).write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{log}"\n')
+                (alt / target).chmod(0o755)
+                (self.bin / "x-terminal-emulator").symlink_to(alt / target)
+                (self.bin / "readlink").symlink_to(shutil.which("readlink"))
+                r = self.run_stubbed(["w1 log", "python3", "x y.py", "arg"])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(log.read_text().splitlines(), [*flags, "python3", "x y.py", "arg"])
+
     def test_maximize_flags(self):
         cases = {
             "gnome-terminal": ["--maximize", "--title", "w1 log", "--"],

@@ -7,6 +7,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -113,13 +114,26 @@ class ReaderTest(RunDirTest):
         self.append('not json\n{"type":"user"}\n')
         self.assertEqual(sd.LogReader(str(self.path)).read_new(), [{"type": "user"}])
 
-    def test_read_meta_through_symlink(self):
-        (self.dir / "agent-x.jsonl").write_text("")
-        (self.dir / "agent-x.meta.json").write_text('{"model":"haiku","effort":"low","finished":true}')
-        os.symlink(self.dir / "agent-x.jsonl", self.dir / "x.output")
-        self.assertEqual(sd.read_meta(str(self.dir / "x.output"))["model"], "haiku")
-        (self.dir / "agent-x.meta.json").unlink()
-        self.assertEqual(sd.read_meta(str(self.dir / "x.output")), {})
+    def test_reader_skips_fifo_and_device(self):  # a roster could point anywhere: a blocking open or endless read would freeze the window
+        fifo = self.dir / "fifo.jsonl"
+        os.mkfifo(fifo)
+        class Blocked(Exception):  # not an OSError, so read_new cannot swallow it
+            pass
+        def timeout(*_):
+            raise Blocked("LogReader blocked")
+        old = signal.signal(signal.SIGALRM, timeout)
+        signal.alarm(3)
+        try:
+            self.assertEqual(sd.LogReader(str(fifo)).read_new(), [])
+            self.assertEqual(sd.LogReader("/dev/zero").read_new(), [])
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    def test_reader_follows_symlink_to_log(self):  # Claude Code output files are symlinks to the real log
+        self.append('{"type":"user"}\n')
+        os.symlink(self.path, self.dir / "x.output")
+        self.assertEqual(sd.LogReader(str(self.dir / "x.output")).read_new(), [{"type": "user"}])
 
     def test_run_over(self):
         dead = subprocess.Popen(["true"])
@@ -290,20 +304,18 @@ class LayoutTest(unittest.TestCase):
         self.assertIsNone(sd.scroll(0, "end", 100, 10))
         self.assertIsNone(sd.scroll(89, "down", 100, 10))
         self.assertEqual(sd.visible(lines, 10, 0), lines[:10])
-        self.assertEqual(sd.visible(sd.collections.deque(lines), 3, 5), lines[5:8])
-        self.assertEqual(sd.visible(sd.collections.deque(lines), 3, None), lines[-3:])
 
 
 class DashTest(RunDirTest):
-    def test_worker_lines_capped(self):
+    def test_worker_keeps_whole_log(self):
         log = self.run / "a.jsonl"
         with open(log, "w") as f:
-            for i in range(sd.MAX_STORED + 5):
+            for i in range(20005):
                 f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": f"line {i}"}]}}) + "\n")
         w = sd.Worker("w1", "haiku", "low", str(log))
         self.assertTrue(w.poll_log())
-        self.assertEqual(len(w.lines), sd.MAX_STORED)
-        self.assertEqual(w.lines[-1], f"line {sd.MAX_STORED + 4}")
+        self.assertEqual(len(w.lines), 20005)
+        self.assertEqual((w.lines[0], w.lines[-1]), ("line 0", "line 20004"))
         self.assertFalse(w.poll_log())
 
     def test_worker_without_log(self):
