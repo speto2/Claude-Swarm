@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -109,6 +110,38 @@ class ReaderTest(RunDirTest):
         self.assertEqual(r.read_new(), [])
         self.append(', "x": 1}\n')
         self.assertEqual(r.read_new(), [{"type": "assistant", "x": 1}])
+
+    def test_reader_survives_absurd_nesting(self):
+        self.append("[" * 100000 + '\n{"type":"user"}\n')
+        self.assertEqual(sd.LogReader(str(self.path)).read_new(), [{"type": "user"}])
+
+    def test_reader_restarts_after_truncation(self):
+        self.append('{"type":"user","n":1}\n{"type":"user","n":2}\n')
+        r = sd.LogReader(str(self.path))
+        self.assertEqual(len(r.read_new()), 2)
+        self.path.write_text('{"type":"user","n":3}\n')
+        self.assertEqual(r.read_new(), [{"type": "user", "n": 3}])
+        self.assertTrue(r.truncated)
+        self.assertEqual(r.read_new(), [])
+        self.assertFalse(r.truncated)
+
+    def test_reader_restarts_after_replacement_by_larger_file(self):
+        self.append('{"type":"user","n":1}\n')
+        r = sd.LogReader(str(self.path))
+        self.assertEqual(len(r.read_new()), 1)
+        new = self.path.with_name("new.jsonl")
+        new.write_text('{"type":"user","n":2}\n{"type":"user","n":3}\n')
+        os.replace(new, self.path)
+        self.assertEqual([x["n"] for x in r.read_new()], [2, 3])
+        self.assertTrue(r.truncated)
+
+    def test_worker_drops_lines_after_truncation(self):
+        self.append('{"type":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n')
+        w = sd.Worker("w", log=str(self.path))
+        w.poll_log()
+        self.path.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"n"}]}}\n')
+        w.poll_log()
+        self.assertEqual(w.lines, ["n"])
 
     def test_reader_skips_malformed(self):
         self.append('not json\n{"type":"user"}\n')
@@ -385,6 +418,14 @@ class UiTest(RunDirTest):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 self.assertEqual(sd.main(argv), 2)
             self.assertIn("usage: swarm-dash.py", err.getvalue())
+
+    def test_main_missing_run_folder(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, unittest.mock.patch("sys.stdout.isatty", create=True, return_value=True):
+            self.assertEqual(sd.main([str(self.dir / "nope")]), 2)
+        self.assertIn("not a folder", err.getvalue())
+
+    def test_run_over_ignores_huge_pid(self):
+        self.assertFalse(sd.run_over(None, 2 ** 80))
 
     def test_main_needs_terminal(self):
         r = subprocess.run([sys.executable, str(SCRIPT), str(self.run)], capture_output=True, text=True)

@@ -106,7 +106,7 @@ Spawn with the Agent tool, in the background: `subagent_type` = the tier, `model
 
 ## 7. Roster and dashboard
 
-- Write `<run>/roster.md` from the spawn results: `| worker | agent id | model | effort | tasks | output file |`. Add any worker spawned later. Agent IDs and paths stay out of chat.
+- Write `<run>/roster.md` from the spawn results: `| worker | agent id | model | effort | tasks | output file |`; `output file` is the log path the Agent tool returned. Add any worker spawned later. Agent IDs and paths stay out of chat.
 - Dashboard off: skip the rest of this step.
 - Dashboard on: open the dashboard in one Bash call. Keep `"$PPID"` literal: in that call it is the Claude Code process that runs the workers. It picks up roster rows added later.
 
@@ -115,7 +115,7 @@ B="<base>/scripts"
 bash "$B/open-window.sh" "swarm: <run folder name>" python3 "$B/swarm-dash.py" "<run>" "$PPID"
 ```
 
-- Exit 3 means no window could open; relay the printed `Run this to watch:` command to the user once.
+- Exit 3 means no window could open; relay the printed `Run this to watch:` command to the user once. Any other nonzero exit: tell the user once and go on without the dashboard.
 
 ## 8. Wait and review
 
@@ -144,14 +144,14 @@ When every worker task is `done`:
 
 - Add the pinned lines to the hub files and set their rows to `done`.
 - Run the full test suite, build and lint where they exist.
-- Read all changes with `python3 "$B/swarm-run.py" diff <run>` for parts that don't fit together, bugs, error handling, code quality and security (input handling, secrets, injection, permissions).
-- A problem inside one worker's files: a FIX report to that worker. A problem spanning several workers' files: fix it yourself if it is a few lines; otherwise spawn one fixer worker (same model and effort) that owns those files.
+- Read all changes with `python3 "$B/swarm-run.py" diff <run>` for parts that don't fit together, bugs, error handling, code quality and security (input handling, secrets, injection, permissions). Read files marked NOT SHOWN directly.
+- A problem inside one worker's files: a FIX report to that worker. A problem spanning several workers' files: fix it yourself if it is a few lines; otherwise spawn one fixer worker (same model and effort) that owns those files; its changes are not in the snapshot, so read them with `git diff`.
 - Repeat until clean, at most 3 rounds.
 - If the user's CLAUDE.md asks for a step after code changes, run it once now.
 
 ## 10. Report
 
-Run `python3 "$B/swarm-run.py" cost <run>`. Write `<run>/report.md` last (it closes the dashboard) and give the same report in chat, under these headings:
+Run `python3 "$B/swarm-run.py" cost <run>`; if it fails, say so under Cost and invent no table. Write `<run>/report.md` last (it closes the dashboard) and give the same report in chat, under these headings:
 
 - **Result**
 - **Tasks**: per task, worker, status, fix rounds used

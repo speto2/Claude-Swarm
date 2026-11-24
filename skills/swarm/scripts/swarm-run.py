@@ -118,7 +118,9 @@ def read_tasks(text, root):
             if not name or name.lower() in ("none", "-"):
                 continue
             path = os.path.normpath(name)
-            if os.path.isabs(path) or path == ".." or path.startswith(".." + os.sep):
+            real = os.path.realpath(os.path.join(root, path))
+            if (os.path.isabs(path) or path == ".." or path.startswith(".." + os.sep)
+                    or os.path.commonpath([real, os.path.realpath(root)]) != os.path.realpath(root)):  # also catches a symlink out of the root
                 problems.append(f"{tid}: {name} is outside the project")
             elif path == ".swarm" or path.startswith(".swarm" + os.sep):
                 problems.append(f"{tid}: {name} is inside .swarm/")
@@ -143,7 +145,7 @@ def cmd_init(text):
     os.makedirs(swarm, exist_ok=True)
     ignore = os.path.join(swarm, ".gitignore")
     if not os.path.exists(ignore):
-        with open(ignore, "w") as f:
+        with open(ignore, "w", encoding="utf-8") as f:
             f.write("*\n")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run, n = os.path.join(swarm, "runs", stamp), 2
@@ -154,7 +156,7 @@ def cmd_init(text):
         except FileExistsError:
             run, n = os.path.join(swarm, "runs", f"{stamp}-{n}"), n + 1
     os.makedirs(os.path.join(run, "workers"))
-    with open(os.path.join(run, "tasks.md"), "w") as f:
+    with open(os.path.join(run, "tasks.md"), "w", encoding="utf-8") as f:
         f.write(text if text.endswith("\n") else text + "\n")
     for files in owned.values():
         for path in files:
@@ -198,10 +200,10 @@ def cmd_diff(run, task=None):
     try:
         with open(os.path.join(run, "snapshot.json")) as f:
             snap = json.load(f)
-    except (OSError, ValueError):
-        print(f"no snapshot.json in {run}", file=sys.stderr)
+        root, owned = snap["root"], snap["owned"]
+    except (OSError, ValueError, KeyError, TypeError):
+        print(f"no valid snapshot.json in {run}", file=sys.stderr)
         return 1
-    root, owned = snap["root"], snap["owned"]
     if task is not None and task not in owned:
         print(f"unknown task {task}; tasks: {', '.join(owned)}", file=sys.stderr)
         return 1
@@ -347,6 +349,8 @@ def cmd_cost(run):
 
 def main(argv):
     if argv[:1] == ["init"] and len(argv) == 1:
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
         return cmd_init(sys.stdin.read())
     if argv[:1] == ["diff"] and len(argv) in (2, 3):
         return cmd_diff(*argv[1:])

@@ -79,7 +79,8 @@ class OpenWindowTest(unittest.TestCase):
     def test_x_terminal_emulator_args_follow_its_target(self):
         alt = self.tmp / "alt"
         alt.mkdir()
-        cases = {"xterm": ["-maximized", "-T", "w1 log", "-e"], "lxterminal": ["-T", "w1 log", "-e"]}
+        cases = {"xterm": ["-maximized", "-T", "w1 log", "-e"],
+                 "xfce4-terminal.wrapper": ["-T", "w1 log", "-e"], "lxterminal": ["-T", "w1 log", "-e"]}
         for target, flags in cases.items():
             with self.subTest(target):
                 for tool in ("x-terminal-emulator", "readlink", "bash", "setsid", "sleep"):

@@ -148,6 +148,24 @@ class GitRunTest(TempDirTest):
         self.assertEqual(sorted(os.listdir(self.root / ".swarm" / "runs")), before)
 
 
+class SymlinkAndSnapshotTest(TempDirTest):
+    def test_symlink_out_of_root_rejected(self):
+        (self.base / "secret.txt").write_text("s\n")
+        os.symlink(self.base, self.root / "out")
+        os.chdir(self.root)
+        code, _, err = run_main(["init"], "| id | files |\n| t1 | out/secret.txt |\n")
+        self.assertEqual(code, 1)
+        self.assertIn("outside the project", err)
+
+    def test_malformed_snapshot_is_clean_error(self):
+        run = self.base / "run"
+        run.mkdir()
+        (run / "snapshot.json").write_text("{}")
+        code, _, err = run_main(["diff", str(run)])
+        self.assertEqual(code, 1)
+        self.assertIn("no valid snapshot.json", err)
+
+
 class NoGitRunTest(TempDirTest):
     def test_init_and_diff_without_git(self):
         (self.root / "src" / "api.py").write_text("v1\n")
