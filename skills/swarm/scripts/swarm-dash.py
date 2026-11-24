@@ -5,7 +5,7 @@ usage: swarm-dash.py <run-folder> [<owner-pid>]
 Exits when <run-folder>/report.md appears or <owner-pid> is gone, so its window closes.
 """
 import curses
-import itertools
+import errno
 import json
 import math
 import os
@@ -16,11 +16,13 @@ import time
 import unicodedata
 
 MAX_LINE = 200
+MAX_LOG_LINES = 100_000  # formatted lines kept per worker; the oldest are dropped past this
+MAX_READ = 1 << 20  # bytes read from a log per poll; also the longest partial line kept
 CLOSE_DELAY = 5  # seconds the last view stays up before the window closes
 STALE_AFTER = 120  # seconds without log growth before a running worker is flagged quiet
 MIN_BOX_W, MIN_BOX_H = 30, 4  # smaller boxes collapse to one line per worker
 MIN_W, MIN_H = 40, 10  # smaller windows only ask to be enlarged
-CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # worker-written text is untrusted: no escape sequences to the terminal
+CTRL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")  # worker-written text is untrusted: no escape sequences to the terminal
 AGENT_MSG = re.compile(r'<agent-message from="([^"]*)">\s*(.*?)\s*</agent-message>', re.S)
 CELL_SPLIT = re.compile(r"(?<!\\)\|")
 
@@ -46,42 +48,46 @@ def summarize(name, inp):
     if not isinstance(inp, dict):
         return ""
     if name == "SendMessage":
-        return f"to {inp.get('to')}: {first_line(inp.get('message', ''))}"
-    for key in ("command", "file_path", "pattern"):
+        return f"to {inp.get('to') or '?'}: {first_line(inp.get('message', ''))}"
+    for key in ("command", "file_path", "pattern", "url", "query"):
         if key in inp:
             return first_line(inp[key])
     return json.dumps(inp, separators=(",", ":"))
+
+
+def _incoming(text):
+    m = AGENT_MSG.search(text)
+    return f"MSG from {m[1]}: {first_line(m[2])}" if m else f"IN: {head(text)}"
 
 
 def _lines(rec):
     kind = rec.get("type")
     if kind == "attachment":
         att = rec.get("attachment") or {}
-        if att.get("type") != "queued_command":
-            return []
-        prompt = str(att.get("prompt", ""))
-        m = AGENT_MSG.search(prompt)
-        return [f"MSG from {m[1]}: {first_line(m[2])}"] if m else [f"IN: {head(prompt)}"]
+        return [_incoming(str(att.get("prompt", "")))] if att.get("type") == "queued_command" else []
     content = (rec.get("message") or {}).get("content")
+    if kind == "user" and isinstance(content, str):
+        content = [{"type": "text", "text": content}]
     out = []
-    if kind == "user":
-        if isinstance(content, str):
-            return [] if content.startswith("<") else [f"IN: {head(content)}"]
-        for item in content or []:
-            if item.get("type") != "tool_result":
-                continue
+    for item in content if isinstance(content, list) and kind in ("user", "assistant") else []:
+        if not isinstance(item, dict):
+            continue
+        typ = item.get("type")
+        if kind == "assistant":
+            if typ == "tool_use":
+                name = item.get("name")
+                out.append(f"-> {name}{' ' if name == 'SendMessage' else ': '}{summarize(name, item.get('input'))}")
+            elif typ == "text":
+                out += [l.strip() for l in item.get("text", "").splitlines() if l.strip()]
+        elif typ == "text":
+            text = str(item.get("text", ""))
+            if AGENT_MSG.search(text) or not text.startswith("<"):
+                out.append(_incoming(text))
+        elif typ == "tool_result":
             body = item.get("content")
             if isinstance(body, list):
                 body = "\n".join(x.get("text", "") for x in body if isinstance(x, dict))
             out.append(f"   {'!!' if item.get('is_error') else '<-'} {first_line(body or '')}")
-    elif kind == "assistant":
-        for item in content or []:
-            if item.get("type") == "tool_use":
-                name = item.get("name")
-                sep = " " if name == "SendMessage" else ": "
-                out.append(f"-> {name}{sep}{summarize(name, item.get('input'))}")
-            elif item.get("type") == "text":
-                out += [l.strip() for l in item.get("text", "").splitlines() if l.strip()]
     return out
 
 
@@ -100,6 +106,7 @@ class LogReader:
         self.path = path
         self.pos = 0
         self.buf = b""
+        self.ident = None  # (st_dev, st_ino) of the file the offset belongs to
         self.tail = b""  # last bytes read, re-read each poll: a mismatch means the file was cut or rewritten
         self.truncated = False  # set by read_new when the file shrank or was rewritten and reading restarted
 
@@ -111,17 +118,23 @@ class LogReader:
                 st = os.fstat(f.fileno())
                 if not stat.S_ISREG(st.st_mode):  # FIFO or device: never a worker log
                     return []
-                if self.tail:
+                ident = (st.st_dev, st.st_ino)
+                if self.ident is not None and (ident != self.ident or st.st_size < self.pos):  # replaced or truncated: start over
+                    self.pos, self.buf, self.tail, self.truncated = 0, b"", b"", True
+                elif self.tail:
                     f.seek(self.pos - len(self.tail))
-                    if f.read(len(self.tail)) != self.tail:  # short read past a cut end, or new bytes: start over
+                    if f.read(len(self.tail)) != self.tail:  # rewritten in place: start over
                         self.pos, self.buf, self.tail, self.truncated = 0, b"", b"", True
+                self.ident = ident
                 f.seek(self.pos)
-                data = f.read()
+                data = f.read(MAX_READ)
         except OSError:
             return []
         self.pos += len(data)
         self.tail = (self.tail + data)[-256:]
         *lines, self.buf = (self.buf + data).split(b"\n")
+        if len(self.buf) > MAX_READ:  # an endless line: drop what we have, its tail fails to parse and is skipped
+            self.buf = b""
         out = []
         for line in lines:
             try:
@@ -133,36 +146,49 @@ class LogReader:
         return out
 
 
+def read_small(path, limit):
+    """(first `limit` bytes, mtime) of a regular file opened without following a symlink or blocking; None for anything else.
+    Raises OSError if it cannot be opened (a roster path is untrusted: a symlink could leak a secret, a FIFO would block open())."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK):
+            return None
+        raise
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        return (f.read(limit), st.st_mtime) if stat.S_ISREG(st.st_mode) else None
+
+
 def worker_status(path):
     try:
-        if not stat.S_ISREG(os.lstat(path).st_mode):  # symlink could leak a secret; a FIFO would block open() forever
+        got = read_small(path, 8192)
+        if got is None:
             return "(not a regular file)"
-        with open(path, errors="replace") as f:
-            for line in f:
-                if line.strip():
-                    text = line.strip()
-                    text = CTRL.sub("", text[len("status:"):].strip() if text.startswith("status:") else text)
-                    return text if len(text) <= MAX_LINE else text[:MAX_LINE - 1] + "…"
+        text = first_line(got[0].decode(errors="replace"))
+        if text:
+            return clip(text[len("status:"):].strip() if text.startswith("status:") else text)
     except OSError:
         pass
     return "(no status yet)"
 
 
 def activity(log, now=None):
-    """' (finished)' or ' (quiet Nm)' for a worker that stopped writing its log; '' while it is active or unknown."""
+    """' (finished)' or ' (quiet Nm)' for a worker that stopped writing its log; '' while it is active or unknown.
+    `now` is wall-clock time: it is compared with file mtimes."""
     if not log:
         return ""
     try:
         real = os.path.realpath(log)
-        idle = (now or time.time()) - os.stat(real).st_mtime
+        log_mtime = os.stat(real).st_mtime
     except OSError:
         return ""
-    meta = os.path.splitext(real)[0] + ".meta.json"
+    idle = (time.time() if now is None else now) - log_mtime
     try:
-        if stat.S_ISREG(os.lstat(meta).st_mode):
-            with open(meta) as f:
-                if json.load(f).get("finished"):
-                    return " (finished)"
+        got = read_small(os.path.splitext(real)[0] + ".meta.json", 65536)
+        # a worker resumed after it finished writes its log again: the older "finished" no longer holds
+        if got and json.loads(got[0]).get("finished") and (got[1] >= log_mtime or idle >= 5):
+            return " (finished)"
     except (OSError, ValueError, AttributeError):
         pass
     return f" (quiet {int(idle // 60)}m)" if idle >= STALE_AFTER else ""
@@ -172,7 +198,7 @@ def run_over(run_dir, pid):
     """True once the overseer wrote report.md or the process that owns the workers is gone."""
     if run_dir and os.path.exists(os.path.join(run_dir, "report.md")):
         return True
-    if pid:
+    if pid and pid > 0:
         try:
             os.kill(pid, 0)  # shortcut: a reused PID keeps the window open; close it by hand then
         except ProcessLookupError:
@@ -182,14 +208,19 @@ def run_over(run_dir, pid):
     return False
 
 
-def parse_table(text):  # same as swarm-run.py
-    """Header names (lower case) and rows (lists of cells) of a markdown table. A `\\|` inside a cell is not a separator."""
+def parse_table(text):
+    """Header names (lower case) and rows (lists of cells) of the first markdown table in text. A `\\|` inside a cell is not a separator."""
     header, rows = None, []
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("|"):
+            if header is not None:
+                break  # the first table has ended; a later table is not merged into it
             continue
-        cells = [c.strip().replace("\\|", "|") for c in CELL_SPLIT.split(line.strip("|"))]
+        line = line[1:]  # at most one edge pipe on each side, so empty edge cells survive
+        if line.endswith("|") and not line.endswith("\\|"):
+            line = line[:-1]
+        cells = [c.strip().replace("\\|", "|") for c in CELL_SPLIT.split(line)]
         if header is None:
             header = [c.lower() for c in cells]
         elif not all(set(c) <= set("-: ") for c in cells):
@@ -217,28 +248,35 @@ def read_roster(run_dir):
     rows, header = _table(run_dir, "roster.md", {"name": "worker", "model": "model", "effort": "effort", "log": "output file"})
     if not {"worker", "model", "effort", "output file"} <= set(header):
         return []
-    return [dict(r, **{k: CTRL.sub("", r[k]) for k in ("name", "model", "effort")}) for r in rows]
+    rows = [dict(r, **{k: CTRL.sub("", r[k]).strip() for k in ("name", "model", "effort")}, log=r["log"].strip("` \t")) for r in rows]
+    return [r for r in rows if r["name"]]
 
 
 class Worker:
     def __init__(self, name, model="", effort="", log=""):
         self.name, self.model, self.effort, self.log = name, model, effort, log
-        self.lines = []  # shortcut: the whole formatted log stays in memory (200 chars a line at most); cap it if runs reach millions of lines
+        self.lines = []  # formatted log, at most MAX_LOG_LINES
+        self.dropped = 0  # lines the last poll_log dropped off the front
         self.status = "(no status yet)"
         self.flag = ""
         self._reader = None
 
     def poll_log(self):
         """Append newly written, formatted log lines; True if there were any."""
+        self.dropped = 0
         if not self.log:
             return False
         if self._reader is None or self._reader.path != self.log:
             self._reader = LogReader(self.log)
         records = self._reader.read_new()
-        if self._reader.truncated:
+        if self._reader.truncated:  # the log restarted: every stored line is gone
+            self.dropped = len(self.lines)
             self.lines.clear()
         new = [line for rec in records for line in format_record(rec)]
         self.lines.extend(new)
+        cut = max(0, len(self.lines) - MAX_LOG_LINES)
+        del self.lines[:cut]
+        self.dropped += cut
         return bool(new)
 
 
@@ -251,10 +289,9 @@ class Dash:
 
     def names(self):
         """Roster order, then workers known only from a status file, by name."""
-        extra = sorted(n for n in self.workers if n not in self._order)
-        return [n for n in self._order if n in self.workers] + extra
+        return self._order + sorted(n for n in self.workers if n not in self._order)
 
-    def refresh_meta(self, now):
+    def refresh_meta(self):
         self.tasks = read_tasks(self.run_dir)
         roster = read_roster(self.run_dir)
         self._order = list(dict.fromkeys(r["name"] for r in roster))
@@ -270,13 +307,15 @@ class Dash:
             self.workers.setdefault(n, Worker(n))
         for n, w in self.workers.items():  # only names listed in workers/ are opened: a roster name must not point elsewhere
             w.status = worker_status(os.path.join(wdir, n + ".md")) if n in files else "(no status yet)"
-            w.flag = activity(w.log, now)
+            w.flag = activity(w.log)
         if self.selected is None and self.workers:
             self.selected = self.names()[0]
 
     def poll_logs(self):
         for w in self.workers.values():
             w.poll_log()
+            if w.dropped and w.name == self.zoom and self.top is not None:  # keep the zoomed view on the same lines
+                self.top = max(0, self.top - w.dropped)
 
     def tick(self, now):
         """False once the run is over and the closing delay has passed."""
@@ -289,9 +328,11 @@ def grid_shape(n, height, width):
     """(cols, rows) for n boxes, or None when no shape gives boxes of at least MIN_BOX_W x MIN_BOX_H."""
     best, best_score = None, 0
     for cols in range(1, n + 1):
-        box_w, box_h = width // cols, height // math.ceil(n / cols)
-        if box_w >= MIN_BOX_W and box_h >= MIN_BOX_H and min(box_w, 3 * box_h) > best_score:  # strict: ties keep fewer columns
-            best, best_score = (cols, math.ceil(n / cols)), min(box_w, 3 * box_h)
+        rows = math.ceil(n / cols)
+        box_w, box_h = width // cols, height // rows
+        score = min(box_w, 3 * box_h)
+        if box_w >= MIN_BOX_W and box_h >= MIN_BOX_H and score > best_score:  # strict: ties keep fewer columns
+            best, best_score = (cols, rows), score
     return best
 
 
@@ -302,12 +343,12 @@ def strip_lines(tasks, width, max_rows):
     items = [CTRL.sub("", f"{t['id']} {t['owner']} {t['status']} f{t['fixes']}  {t['title']}") for t in tasks]
     n = len(items)
     if n <= max_rows:
-        return [i[:width] for i in items]
+        return [fit(i, width) for i in items]
     cols = max(1, min(math.ceil(n / max_rows), width // MIN_BOX_W))
     shown = n if cols * max_rows >= n else cols * (max_rows - 1)
     rows = math.ceil(shown / cols) if shown else 0
     cw = width // cols - 1  # one blank column between strip columns
-    out = [" ".join(items[c * rows + r][:cw].ljust(cw) for c in range(cols) if c * rows + r < shown).rstrip()[:width]
+    out = [" ".join(fit(items[c * rows + r], cw, pad=True) for c in range(cols) if c * rows + r < shown).rstrip()[:width]
            for r in range(rows)]
     return out + ([f"… {n - shown} more"[:width]] if shown < n else [])
 
@@ -345,19 +386,15 @@ def scroll(top, key, total, height):
     """New zoom scroll position; None follows the newest line."""
     bottom = max(0, total - height)
     cur = bottom if top is None else top
-    new = {"up": cur - 1 if top is not None else max(0, total - height - 1), "down": cur + 1, "pgup": cur - height,
-           "pgdn": cur + height, "home": 0, "end": bottom}.get(key, cur)
-    new = max(0, new)
-    return None if key == "end" or new >= total - height else new
+    new = max(0, {"up": cur - 1, "down": cur + 1, "pgup": cur - height, "pgdn": cur + height, "home": 0}.get(key, cur))
+    return None if key == "end" or new >= bottom else new
 
 
 def visible(lines, height, top):
     """The last `height` lines (top None) or the `height` lines from index `top`."""
     if height < 1:
         return []
-    if top is None:
-        return list(itertools.islice(reversed(lines), height))[::-1]
-    return list(itertools.islice(lines, top, top + height))
+    return lines[-height:] if top is None else lines[top:top + height]
 
 
 KEYS = {curses.KEY_LEFT: "left", curses.KEY_RIGHT: "right", curses.KEY_UP: "up", curses.KEY_DOWN: "down", 9: "tab",
@@ -366,15 +403,14 @@ KEYS = {curses.KEY_LEFT: "left", curses.KEY_RIGHT: "right", curses.KEY_UP: "up",
 KEYS.update({ord(c): c for c in "123456789"})
 
 
-def key_name(ch):
-    return KEYS.get(ch)
-
-
 def fit(text, width, pad=False):
     """`text` cut to `width` terminal cells (wide characters count 2), optionally padded with spaces."""
     out, used = [], 0
     for ch in text:
-        cw = 0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+        zero = unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf")
+        if zero and used == 0:
+            continue  # a mark with nothing before it would attach to the neighbouring cell
+        cw = 0 if zero else 2 if unicodedata.east_asian_width(ch) in "WF" else 1
         if used + cw > width:
             break
         out.append(ch)
@@ -407,7 +443,7 @@ def layout(dash, height, width):
     """(strip rows, first body row, body height, grid shape or None) for the grid view."""
     closing = dash.closing_at is not None
     strip = strip_lines(dash.tasks, width, max(1, height // 3) - closing)
-    top = len(strip) + closing + 1
+    top = len(strip) + closing + 1 if strip or closing else 0  # no separator line under an empty strip
     # width + 1: each box is drawn one cell narrower than its slot, so the last box needs no blank column after it
     return strip, top, height - top, grid_shape(len(dash.names()), height - top, width + 1)
 
@@ -419,8 +455,8 @@ def draw(stdscr, dash, now):
         put(stdscr, 0, 0, "enlarge the window")
     elif dash.zoom in dash.workers:
         wk = dash.workers[dash.zoom]
-        head = " | ".join(p for p in (title(wk), wk.status + wk.flag) if p) + ("  " + closing_text(dash, now)).rstrip()
-        put(stdscr, 0, 0, head, curses.A_REVERSE)
+        bar = " | ".join(p for p in (title(wk), wk.status + wk.flag) if p) + ("  " + closing_text(dash, now)).rstrip()
+        put(stdscr, 0, 0, bar, curses.A_REVERSE)
         for i, line in enumerate(visible(wk.lines, h - 1, dash.top)):
             put(stdscr, 1 + i, 0, line)
     else:
@@ -428,7 +464,8 @@ def draw(stdscr, dash, now):
         closing = [closing_text(dash, now)] if dash.closing_at is not None else []
         for i, line in enumerate(closing + strip):
             put(stdscr, i, 0, line, curses.A_BOLD if closing and i == 0 else 0)
-        put(stdscr, top - 1, 0, "-" * w)
+        if top:
+            put(stdscr, top - 1, 0, "-" * w)
         names = dash.names()
         if not names:
             put(stdscr, top, 0, "(no workers yet)")
@@ -474,9 +511,9 @@ def run(stdscr, dash):
     stdscr.timeout(200)
     last_meta = last_log = float("-inf")
     while True:
-        now = time.time()
+        now = time.monotonic()  # intervals and the close countdown must not follow clock jumps
         if now - last_meta >= 2:
-            dash.refresh_meta(now)
+            dash.refresh_meta()
             last_meta = now
         if now - last_log >= 0.5:
             dash.poll_logs()
@@ -484,7 +521,7 @@ def run(stdscr, dash):
         if not dash.tick(now):
             return 0
         draw(stdscr, dash, now)
-        key = key_name(stdscr.getch())
+        key = KEYS.get(stdscr.getch())
         if key:
             h, w = stdscr.getmaxyx()
             shape = layout(dash, h, w)[3]
@@ -497,6 +534,8 @@ def main(argv):
         if len(argv) not in (1, 2):
             raise ValueError
         run_dir, pid = argv[0], int(argv[1]) if len(argv) == 2 else None
+        if pid is not None and pid <= 0:  # os.kill(0 or negative) would signal whole process groups
+            raise ValueError
     except ValueError:
         print("usage: swarm-dash.py <run-folder> [<owner-pid>]", file=sys.stderr)
         return 2
