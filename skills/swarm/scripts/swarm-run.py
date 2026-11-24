@@ -3,9 +3,8 @@
 
 usage:
   swarm-run.py init < table.md          check the task table, create the run folder and snapshot, print the run folder
-  swarm-run.py diff <run> [<task-id>]   changes in one task's files (every task's without an id) since the snapshot;
-                                        with an id it also records that task's files in <run>/reviewed.json and flags
-                                        changes in other tasks' files (pending: against the snapshot, done: against reviewed.json)
+  swarm-run.py diff <run> [<task-id>]   changes in one task's files (all tasks' without an id) since the snapshot; with an id it
+                                        also records that task's file hashes in <run>/reviewed.json and flags changes in other tasks' files
   swarm-run.py cost <run>               tokens and estimated cost per agent, as a markdown table
 
 Paths in the task table are relative to the project root: the git top level, else the current folder.
@@ -256,41 +255,33 @@ def cmd_init(text):
 
 
 def file_diff(old_path, new_path, name):
-    """(header line, diff body lines); the body is empty when unchanged, binary, too large or not a regular file."""
+    """(header line, diff body lines); header None when unchanged; the body is empty unless it is a text diff."""
     try:
         mode = os.lstat(new_path).st_mode
     except OSError:
         mode = None
     if mode is not None and not stat.S_ISREG(mode):
-        if stat.S_ISDIR(mode):
-            return f"== {name}: directory", []
-        if stat.S_ISLNK(mode):
-            return f"== {name}: symlink -> {os.readlink(new_path)}", []
-        return f"== {name}: special file", []
+        what = "directory" if stat.S_ISDIR(mode) else f"symlink -> {os.readlink(new_path)}" if stat.S_ISLNK(mode) else "special file"
+        return f"== {name}: {what}", []
     old, new = read_bytes(old_path), read_bytes(new_path)
-    if old is LARGE or new is LARGE:
-        ho, hn = file_hash(old_path), file_hash(new_path)
-        if ho == hn:
-            return None, []
-        kind = "new" if ho is None else "deleted" if hn is None else "modified"
-        return f"== {name}: {kind}, too large to diff", []
-    if old == new:
+    large = old is LARGE or new is LARGE
+    if (file_hash(old_path) == file_hash(new_path)) if large else old == new:
         return None, []
     kind = "new" if old is None else "deleted" if new is None else "modified"
+    if large:
+        return f"== {name}: {kind}, too large to diff", []
     if b"\0" in (old or b"") or b"\0" in (new or b""):
         return f"== {name}: {kind}, binary", []
-    a = (old or b"").decode(errors="replace").splitlines()
-    b = (new or b"").decode(errors="replace").splitlines()
+    a, b = ((x or b"").decode(errors="replace").splitlines() for x in (old, new))
     body = list(difflib.unified_diff(a, b, lineterm=""))[2:]  # the == header names the file
-    plus = sum(1 for line in body if line.startswith("+"))
-    minus = sum(1 for line in body if line.startswith("-"))
+    plus = sum(line.startswith("+") for line in body)
     note = ""
     if kind == "modified" and not body:  # the bytes differ but no line does
         nl = lambda x: x.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         note = ("; line endings changed" if nl(old) == nl(new)
                 else "; trailing newline changed" if nl(old).rstrip(b"\n") == nl(new).rstrip(b"\n")
                 else "; only non-UTF-8 bytes changed")
-    return f"== {name}: {kind} (+{plus} -{minus}{note})", body
+    return f"== {name}: {kind} (+{plus} -{sum(line.startswith('-') for line in body)}{note})", body
 
 
 def read_text(path):
@@ -312,8 +303,7 @@ def cmd_diff(run, task=None):
         print(f"no valid snapshot.json in {run}", file=sys.stderr)
         return 1
     root, owned = snap.get("root"), snap.get("owned")
-    if not isinstance(root, str) or not isinstance(owned, dict) or not all(
-            isinstance(ps, list) for ps in owned.values()):
+    if not isinstance(root, str) or not isinstance(owned, dict) or not all(isinstance(ps, list) for ps in owned.values()):
         print(f"no valid snapshot.json in {run}: malformed", file=sys.stderr)
         return 1
     why = lambda p: "contains .." if isinstance(p, str) and ".." in p.split(os.sep) else bad_path(root, p, follow=False)
@@ -324,16 +314,15 @@ def cmd_diff(run, task=None):
     if task is not None and task not in owned:
         print(f"unknown task {task}; tasks: {', '.join(owned)}", file=sys.stderr)
         return 1
-    owners = snap.get("owners") if isinstance(snap.get("owners"), dict) else {}
+    owners = snap["owners"] if isinstance(snap.get("owners"), dict) else {}
     files = owned[task] if task is not None else [p for ps in owned.values() for p in ps]
-    budget, unchanged, skipped = MAX_DIFF_LINES, [], []
+    budget, unchanged = MAX_DIFF_LINES, []
     for path in files:
         header, body = file_diff(os.path.join(run, "snapshot", path), os.path.join(root, path), path)
         if header is None:
             unchanged.append(path)
         elif len(body) > budget:
-            print(f"{header} [not shown: over the {MAX_DIFF_LINES}-line cap]")
-            skipped.append(path)
+            print(f"{header} NOT SHOWN (over the {MAX_DIFF_LINES}-line cap), read it directly")
         else:
             print(header)
             if body:
@@ -341,12 +330,8 @@ def cmd_diff(run, task=None):
             budget -= len(body)
     if unchanged:
         print("unchanged: " + ", ".join(unchanged))
-    if skipped:
-        print("NOT SHOWN, read these directly: " + ", ".join(skipped))
 
-    def moved(p):
-        return file_hash(os.path.join(run, "snapshot", p)) != file_hash(os.path.join(root, p))
-
+    moved = lambda p: file_hash(os.path.join(run, "snapshot", p)) != file_hash(os.path.join(root, p))
     if task is not None:
         # main edits its hub files only in the final review, so any change before then came from a worker
         hub = [p for t, ps in owned.items() if t != task and owners.get(t) == "main" for p in ps]
@@ -357,8 +342,9 @@ def cmd_diff(run, task=None):
         reviewed = load_json(reviewed_path)
         reviewed = reviewed if isinstance(reviewed, dict) else {}
         header, rows = parse_table(read_text(os.path.join(run, "tasks.md")))
-        status = {r[header.index("id")]: r[header.index("status")].strip("` ").lower()
-                  for r in rows if "id" in header and "status" in header and len(r) == len(header)}
+        status = {}
+        if "id" in header and "status" in header:
+            status = {r[header.index("id")]: r[header.index("status")].strip("` ").lower() for r in rows if len(r) == len(header)}
         others = []
         for t, ps in owned.items():
             if t == task or owners.get(t) == "main":
@@ -433,6 +419,9 @@ def count(v):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
+FIELDS = (("input", "input_tokens"), ("write", "cache_creation_input_tokens"), ("read", "cache_read_input_tokens"), ("output", "output_tokens"))
+
+
 def tally(recs):
     """Token totals and estimated dollars over the assistant requests in a log; each request counted once."""
     t = {"requests": 0, "input": 0, "write": 0, "read": 0, "output": 0, "usd": 0.0, "models": set(), "unpriced": False}
@@ -446,20 +435,20 @@ def tally(recs):
         if mid not in final or count(usage.get("output_tokens")) >= count(final[mid][1].get("output_tokens")):
             final[mid] = (msg, usage)
     for msg, usage in final.values():
-        inp, out = count(usage.get("input_tokens")), count(usage.get("output_tokens"))
-        write, read = count(usage.get("cache_creation_input_tokens")), count(usage.get("cache_read_input_tokens"))
-        if not (inp or out or write or read):
+        n = {k: count(usage.get(f)) for k, f in FIELDS}
+        if not any(n.values()):
             continue
         cc = usage.get("cache_creation")
-        w1h = min(count(cc.get("ephemeral_1h_input_tokens")) if isinstance(cc, dict) else 0, write)
+        w1h = min(count(cc.get("ephemeral_1h_input_tokens")) if isinstance(cc, dict) else 0, n["write"])
         model = msg.get("model") if isinstance(msg.get("model"), str) and msg.get("model") else "?"
         t["requests"] += 1
-        t["input"], t["write"], t["read"], t["output"] = t["input"] + inp, t["write"] + write, t["read"] + read, t["output"] + out
+        for k, v in n.items():
+            t[k] += v
         t["models"].add(model)
         price = lookup_price(model)
         if price:
             pin, pout, rmul = price
-            t["usd"] += (inp + (write - w1h) * WRITE_5M + w1h * WRITE_1H + read * rmul) * pin / 1e6 + out * pout / 1e6
+            t["usd"] += (n["input"] + (n["write"] - w1h) * WRITE_5M + w1h * WRITE_1H + n["read"] * rmul) * pin / 1e6 + n["output"] * pout / 1e6
         else:
             t["unpriced"] = True
     return t
@@ -505,12 +494,9 @@ def cmd_cost(run):
         k = next((j for j in range(len(starts) - 1, -1, -1) if starts[j][1] and starts[j][1] <= started), k)
     nxt = starts[k + 1] if starts and k + 1 < len(starts) else None  # the next /swarm start ends this run's share
     start_dt, end_dt = (starts[k][1] if starts else None), (nxt[1] if nxt else None)
-    workers, seen_logs, others = {}, set(), []
-    for key, log in rostered.items():
-        workers[key] = (names[key], tally(records(log)))
-        seen_logs.add(log)
+    workers, others = {key: (names[key], tally(records(log))) for key, log in rostered.items()}, []
     for log in glob.glob(os.path.join(session, "subagents", "agent-*.jsonl")):
-        if os.path.realpath(log) in seen_logs:
+        if os.path.realpath(log) in rostered.values():
             continue
         aid = os.path.basename(log)[len("agent-"):-len(".jsonl")]
         recs = list(records(log))
@@ -525,19 +511,22 @@ def cmd_cost(run):
     agents += [workers[a] for a in names if a in workers] + [(label, t) for _, label, t in sorted(others, key=lambda o: o[0])]
     lines = ["| agent | model | requests | input | cache write | cache read | output | est. cost |", "|---|---|---|---|---|---|---|---|"]
     total = {"requests": 0, "input": 0, "write": 0, "read": 0, "output": 0, "usd": 0.0}
+
+    def row(label, models, t, unpriced):
+        return (f"| {label} | {models} | {t['requests']:,} | {t['input']:,} | {t['write']:,} | {t['read']:,} | {t['output']:,} | "
+                f"${t['usd']:.2f}{'+?' if unpriced else ''} |")
+
     for label, t in agents:
-        cost = f"${t['usd']:.2f}" + ("+?" if t["unpriced"] else "")
-        lines.append(f"| {cell(label)} | {cell(', '.join(sorted(t['models']))) or '-'} | {t['requests']} | {t['input']:,} | {t['write']:,} | {t['read']:,} | {t['output']:,} | {cost} |")
+        lines.append(row(cell(label), cell(", ".join(sorted(t["models"]))) or "-", t, t["unpriced"]))
         for key in total:
             total[key] += t[key]
-    cost = f"${total['usd']:.2f}" + ("+?" if any(t["unpriced"] for _, t in agents) else "")
-    lines.append(f"| total | | {total['requests']} | {total['input']:,} | {total['write']:,} | {total['read']:,} | {total['output']:,} | {cost} |")
+    lines.append(row("total", "", total, any(t["unpriced"] for _, t in agents)))
     print("\n".join(lines))
     if starts and total["usd"]:
-        print(f"\nOverseer share of the estimated cost: {agents[0][1]['usd'] / total['usd']:.0%}.")
+        print(f"\nOverseer share: {agents[0][1]['usd'] / total['usd']:.0%}.")
     elif not starts:
         print("\nOverseer not counted: no /swarm command found in its session log.")
-    print("Estimates at Anthropic list prices as of 2026-11-03; `+?` marks tokens of a model without a price. The step that writes the report is not counted.")
+    print("Estimates at list prices of 2026-11-03; `+?` = tokens of a model without a price. The step that writes the report is not counted.")
     return 0
 
 

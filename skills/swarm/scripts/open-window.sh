@@ -23,7 +23,7 @@ fallback() {
   exit 3
 }
 
-[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || fallback "$@" # Close when command in $@ exits 
+[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || fallback "$@"
 
 # -w (wait, so $! tracks the terminal) is util-linux only; probe once, degrade to plain setsid or nohup.
 if setsid -w true >/dev/null 2>&1; then detach=(setsid -w)

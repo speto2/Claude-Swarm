@@ -49,7 +49,7 @@ class TempDirTest(unittest.TestCase):
         self.addCleanup(env.stop)
 
 
-class GitRunTest(TempDirTest):
+class GitRunBase(TempDirTest):
     def setUp(self):
         super().setUp()
         (self.root / "src" / "api.py").write_text("def a():\n    return 1\n")
@@ -66,9 +66,12 @@ class GitRunTest(TempDirTest):
         code, out, err = run_main(["init"], TABLE)
         self.assertEqual(code, 0, err)
         self.run_dir = out.strip()
+        self.run_path = pathlib.Path(self.run_dir)
 
+
+class GitRunTest(GitRunBase):
     def test_init_layout(self):
-        run = pathlib.Path(self.run_dir)
+        run = self.run_path
         self.assertEqual(run.parent.parent, self.root / ".swarm")
         self.assertEqual((self.root / ".swarm" / ".gitignore").read_text(), "*\n")
         self.assertEqual((run / "tasks.md").read_text(), TABLE)
@@ -80,6 +83,7 @@ class GitRunTest(TempDirTest):
         self.assertEqual(snap["owned"], {"t1": ["src/api.py", "src/new.py"], "t2": ["docs/a b.md"], "h1": ["hub.py"]})
         self.assertEqual(snap["owners"], {"t1": "w1-api", "t2": "w2-docs", "h1": "main"})
         self.assertEqual(sorted(snap["dirty"]), ["dirty.txt", "docs/a b.md"])
+        self.assertIsNotNone(sr.parse_ts(snap["started_at"]))
 
     def test_second_init_same_second_gets_own_folder(self):
         with mock.patch.object(sr.time, "strftime", return_value=pathlib.Path(self.run_dir).name):
@@ -126,8 +130,7 @@ class GitRunTest(TempDirTest):
             code, out, err = run_main(["diff", self.run_dir, "t1"])
         self.assertEqual(code, 0, err)
         self.assertIn("== src/new.py: new, binary", out)
-        self.assertIn("[not shown: over the 10-line cap]", out)
-        self.assertIn("NOT SHOWN, read these directly: src/api.py", out)
+        self.assertIn("== src/api.py: modified (+50 -2) NOT SHOWN (over the 10-line cap)", out)
         self.assertNotIn("line 49", out)
 
     def test_diff_of_a_deleted_owned_file(self):
@@ -248,7 +251,7 @@ def write_log(path, recs):
     path.write_text("".join(json.dumps(r) + "\n" for r in recs) + "{not json\n")
 
 
-class CostTest(unittest.TestCase):
+class CostBase(unittest.TestCase):
     def setUp(self):
         self.base = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.base)
@@ -284,6 +287,8 @@ class CostTest(unittest.TestCase):
             "| worker | agent id | model | effort | tasks | output file |\n|---|---|---|---|---|---|\n"
             f"| w1-api | aaa | sonnet | medium | t1 | {out_file} |\n")
 
+
+class CostTest(CostBase):
     def test_tally_dedupes_and_prices(self):
         t = sr.tally(sr.records(self.base / "projects" / "p" / "sess.jsonl"))
         self.assertEqual(t["requests"], 2)  # m0 and m1 once each; the synthetic zero-usage record is skipped
@@ -298,7 +303,7 @@ class CostTest(unittest.TestCase):
         self.assertIn("| other: Explore | claude-future-9 | 1 | 5 | 0 | 0 | 5 | $0.00+? |", out)
         self.assertNotIn("haiku", out)  # agent ccc started before this run
         self.assertLess(out.index("| w1-api"), out.index("| other: Explore"))
-        self.assertIn("Overseer share of the estimated cost: 84%.", out)
+        self.assertIn("Overseer share: 84%.", out)
 
     def test_cost_without_worker_log(self):
         (self.run_dir / "roster.md").write_text("| worker | agent id | output file |\n| w1 | aaa | /nonexistent |\n")
@@ -309,7 +314,6 @@ class CostTest(unittest.TestCase):
     def test_usage_errors(self):
         for argv in ([], ["init", "x"], ["diff"], ["cost"], ["bogus"]):
             self.assertEqual(run_main(argv)[0], 2, argv)
-
 
 
 class ParseTableTest(unittest.TestCase):
@@ -323,10 +327,7 @@ class ParseTableTest(unittest.TestCase):
         self.assertEqual((h, rows), (["a", "b"], [["1", "2"]]))
 
 
-class SafetyTest(GitRunTest):
-    def paths(self):
-        return pathlib.Path(self.run_dir)
-
+class SafetyTest(GitRunBase):
     def test_init_rejects_symlink_escaping_root(self):
         (self.base / "secret.txt").write_text("secret\n")
         (self.root / "src" / "esc.py").symlink_to(self.base / "secret.txt")
@@ -364,7 +365,7 @@ class SafetyTest(GitRunTest):
         self.assertNotIn("TOPSECRET", out)
 
     def test_large_file_compared_by_hash(self):
-        big, snap = self.root / "src" / "api.py", self.paths() / "snapshot" / "src" / "api.py"
+        big, snap = self.root / "src" / "api.py", self.run_path / "snapshot" / "src" / "api.py"
         with mock.patch.object(sr, "MAX_READ", 16):
             self.assertIs(sr.read_bytes(big), sr.LARGE)
             self.assertEqual(sr.file_diff(snap, big, "src/api.py"), (None, []))  # same bytes as the snapshot
@@ -372,7 +373,7 @@ class SafetyTest(GitRunTest):
             self.assertEqual(sr.file_diff(snap, big, "src/api.py"), ("== src/api.py: modified, too large to diff", []))
 
     def test_tampered_snapshot_paths_rejected(self):
-        snap_path = self.paths() / "snapshot.json"
+        snap_path = self.run_path / "snapshot.json"
         good = snap_path.read_text()
         for bad, why in (("../secret", "contains .."), ("/etc/passwd", "outside"), (".swarm/runs/x", ".swarm"), ("a/../../b", "contains ..")):
             snap = json.loads(good)
@@ -392,21 +393,21 @@ class SafetyTest(GitRunTest):
         (self.root / "docs" / "a b.md").write_text("by t1\n")
         out = run_main(["diff", self.run_dir, "t1"])[1]
         self.assertIn("CHANGED IN OTHER TASKS' FILES: docs/a b.md (t2 pending)", out)
-        reviewed = json.loads((self.paths() / "reviewed.json").read_text())
+        reviewed = json.loads((self.run_path / "reviewed.json").read_text())
         self.assertEqual(sorted(reviewed["t1"]), ["src/api.py", "src/new.py"])
         run_main(["diff", self.run_dir, "t2"])  # t2 reviewed with its file as it is now
-        tasks = (self.paths() / "tasks.md").read_text().replace("| t2 | docs | w2-docs | pending", "| t2 | docs | w2-docs | done")
-        (self.paths() / "tasks.md").write_text(tasks)
+        tasks = (self.run_path / "tasks.md").read_text().replace("| t2 | docs | w2-docs | pending", "| t2 | docs | w2-docs | done")
+        (self.run_path / "tasks.md").write_text(tasks)
         self.assertNotIn("OTHER TASKS", run_main(["diff", self.run_dir, "t1"])[1])  # unchanged since t2's review
         (self.root / "docs" / "a b.md").write_text("by t1 again\n")
         self.assertIn("(t2 done)", run_main(["diff", self.run_dir, "t1"])[1])
-        reviewed = json.loads((self.paths() / "reviewed.json").read_text())
+        reviewed = json.loads((self.run_path / "reviewed.json").read_text())
         self.assertIn("t1", reviewed)  # merged, not replaced
         self.assertIn("t2", reviewed)
 
     def test_peer_check_skips_done_task_without_review(self):
-        tasks = (self.paths() / "tasks.md").read_text().replace("| t2 | docs | w2-docs | pending", "| t2 | docs | w2-docs | done")
-        (self.paths() / "tasks.md").write_text(tasks)
+        tasks = (self.run_path / "tasks.md").read_text().replace("| t2 | docs | w2-docs | pending", "| t2 | docs | w2-docs | done")
+        (self.run_path / "tasks.md").write_text(tasks)
         (self.root / "docs" / "a b.md").write_text("changed\n")
         self.assertNotIn("OTHER TASKS", run_main(["diff", self.run_dir, "t1"])[1])
 
@@ -435,10 +436,6 @@ class SafetyTest(GitRunTest):
         self.assertIn("changes outside the tasks' files not checked: git status failed", out)
         self.assertNotIn("nothing changed", out)
 
-    def test_init_stores_started_at(self):
-        snap = json.loads((self.paths() / "snapshot.json").read_text())
-        self.assertIsNotNone(sr.parse_ts(snap["started_at"]))
-
     def test_non_utf8_path_does_not_crash_diff(self):
         name = b"bad\xff.txt"
         try:
@@ -459,7 +456,7 @@ class SafetyTest(GitRunTest):
         f.write_bytes(b"def a():\n    return 1")
         self.assertIn("(+0 -0; trailing newline changed)", run_main(["diff", self.run_dir, "t1"])[1])
         f.write_bytes(b"def a():\n    return \xfe\n")
-        (self.paths() / "snapshot" / "src" / "api.py").write_bytes(b"def a():\n    return \xff\n")
+        (self.run_path / "snapshot" / "src" / "api.py").write_bytes(b"def a():\n    return \xff\n")
         self.assertIn("only non-UTF-8 bytes changed", run_main(["diff", self.run_dir, "t1"])[1])
 
     def test_file_replaced_by_directory(self):
@@ -484,8 +481,8 @@ class PriceTest(unittest.TestCase):
         for order in ([a, b], [b, a]):
             t = sr.tally(order)
             self.assertEqual((t["requests"], t["output"]), (1, 500))
-        t = sr.tally([rec("assistant", "t", mid=None, model="claude-opus-5-5", usage=usage(1, 0, 0, 1))] * 2)
-        self.assertEqual(t["requests"], 2)  # no id: each record counts
+        t = sr.tally([rec("assistant", "t", mid=None, model="claude-opus-5-5", usage=usage(1, 0, 0, 1))] * 3)
+        self.assertEqual((t["requests"], t["input"], t["output"]), (3, 3, 3))  # no id: each record counts
 
     def test_tally_survives_malformed_usage(self):
         bad = rec("assistant", "t", mid="m", model="claude-opus-5-5",
@@ -511,7 +508,7 @@ class PriceTest(unittest.TestCase):
         self.assertIsNone(sr.parse_ts(None))
 
 
-class CostRunsTest(CostTest):
+class CostRunsTest(CostBase):
     def snapshot(self, started_at):
         (self.run_dir / "snapshot.json").write_text(json.dumps({"started_at": started_at}))
 
@@ -576,10 +573,6 @@ class CostRunsTest(CostTest):
 
 
 class TallyBranchesTest(unittest.TestCase):
-    def test_message_id_none_counts_each_record(self):
-        t = sr.tally([rec("assistant", "t", mid=None, model="claude-opus-5-5", usage=usage(1, 0, 0, 1))] * 3)
-        self.assertEqual((t["requests"], t["input"], t["output"]), (3, 3, 3))
-
     def test_one_hour_cache_write_is_clamped_to_the_total_write(self):
         u = usage(0, 1000, 0, 0)
         u["cache_creation"]["ephemeral_1h_input_tokens"] = 5000  # more than was written

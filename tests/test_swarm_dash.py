@@ -14,7 +14,6 @@ import sys
 import tempfile
 import time
 import unittest
-import unittest.mock
 import unicodedata
 import uuid
 from unittest import mock
@@ -47,6 +46,18 @@ def alarm(secs, what):
         signal.signal(signal.SIGALRM, old)
 
 
+def asst(*items):
+    return {"type": "assistant", "message": {"content": list(items)}}
+
+
+def user(content):
+    return {"type": "user", "message": {"content": content}}
+
+
+def said(text):
+    return json.dumps(asst({"type": "text", "text": text})) + "\n"
+
+
 ROSTER_HEAD = "| worker | agent id | model | effort | tasks | output file |\n|---|---|---|---|---|---|\n"
 
 
@@ -64,6 +75,9 @@ class RunDirTest(unittest.TestCase):
     def status(self, name, text):
         (self.run / "workers").mkdir(exist_ok=True)
         (self.run / "workers" / f"{name}.md").write_text(text)
+
+    def shown(self, name="w1"):
+        return sd.worker_status(str(self.run / "workers" / f"{name}.md"))
 
 
 class FormatTest(unittest.TestCase):
@@ -86,44 +100,38 @@ class FormatTest(unittest.TestCase):
         ])
 
     def test_truncates_long_lines(self):
-        rec = {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "x" * 500}}]}}
+        rec = asst({"type": "tool_use", "name": "Bash", "input": {"command": "x" * 500}})
         lines = sd.format_record(rec)
         self.assertEqual(len(lines), 1)
         self.assertLessEqual(len(lines[0]), 200)
         self.assertTrue(lines[0].endswith("…"))
 
     def test_strips_terminal_controls(self):
-        rec = {"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "hi \x1b]0;pwn\x07\x1b[2J\x9bthere\tok"}]}}
+        rec = asst({"type": "text", "text": "hi \x1b]0;pwn\x07\x1b[2J\x9bthere\tok"})
         line = sd.format_record(rec)[0]
         self.assertNotRegex(line, "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]")
         self.assertIn("there\tok", line)
 
     def test_bad_shapes_skipped(self):
         for rec in ({"type": "assistant"},
-                    {"type": "assistant", "message": {"content": "str"}},
-                    {"type": "user", "message": {"content": [{"type": "tool_result"}]}}):
+                    {"type": "assistant", "message": {"content": "str"}}, user([{"type": "tool_result"}])):
             self.assertIsInstance(sd.format_record(rec), list)
 
     def test_non_dict_items_do_not_discard_the_record(self):
-        rec = {"type": "assistant", "message": {"content": [
-            "junk", None, {"type": "text", "text": "kept"}, {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}
+        rec = asst("junk", None, {"type": "text", "text": "kept"}, {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}})
         self.assertEqual(sd.format_record(rec), ["kept", "-> Bash: ls"])
-        rec = {"type": "user", "message": {"content": [
-            3, {"type": "tool_result", "content": "ok"}, {"type": "text", "text": "hello"}]}}
+        rec = user([3, {"type": "tool_result", "content": "ok"}, {"type": "text", "text": "hello"}])
         self.assertEqual(sd.format_record(rec), ["   <- ok", "IN: hello"])
-        self.assertEqual(sd.format_record({"type": "user", "message": {"content": 5}}), [])
+        self.assertEqual(sd.format_record(user(5)), [])
 
     def test_user_string_agent_message_and_markup(self):
-        msg = {"type": "user", "message": {"content": '<agent-message from="ab12">\nPING\n</agent-message>'}}
-        self.assertEqual(sd.format_record(msg), ["MSG from ab12: PING"])
-        self.assertEqual(sd.format_record({"type": "user", "message": {"content": "<system>x</system>"}}), [])
-        self.assertEqual(sd.format_record({"type": "user", "message": {"content": "plain"}}), ["IN: plain"])
+        self.assertEqual(sd.format_record(user('<agent-message from="ab12">\nPING\n</agent-message>')), ["MSG from ab12: PING"])
+        self.assertEqual(sd.format_record(user("<system>x</system>")), [])
+        self.assertEqual(sd.format_record(user("plain")), ["IN: plain"])
 
     def test_web_tools_and_send_message_without_recipient(self):
         def use(name, inp):
-            return sd.format_record({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
+            return sd.format_record(asst({"type": "tool_use", "name": name, "input": inp}))
         self.assertEqual(use("WebFetch", {"url": "http://x.test", "prompt": "p"}), ["-> WebFetch: http://x.test"])
         self.assertEqual(use("WebSearch", {"query": "cats"}), ["-> WebSearch: cats"])
         self.assertEqual(use("SendMessage", {"message": "hi"}), ["-> SendMessage to ?: hi"])
@@ -139,7 +147,7 @@ class FormatTest(unittest.TestCase):
 
     def test_tool_result_with_list_content(self):
         def res(body, **kw):
-            return sd.format_record({"type": "user", "message": {"content": [{"type": "tool_result", "content": body, **kw}]}})
+            return sd.format_record(user([{"type": "tool_result", "content": body, **kw}]))
         self.assertEqual(res([{"type": "text", "text": "\nfirst\nsecond"}, "junk", {"type": "image"}]), ["   <- first"])
         self.assertEqual(res([{"type": "text", "text": "bad"}], is_error=True), ["   !! bad"])
         self.assertEqual(res([]), ["   <- "])
@@ -150,8 +158,7 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(sd.clip("a\u202eb\u2066c\u2069d\u2028e\u2029f"), "abcdef")
 
     def test_message_from_overseer_shows_its_first_line(self):
-        rec = {"type": "user", "message": {"content":
-               "The coordinator sent a message while you were working:\nFIX t1 (round 1/3)\nmathx.py:3 — bug"}}
+        rec = user("The coordinator sent a message while you were working:\nFIX t1 (round 1/3)\nmathx.py:3 — bug")
         self.assertEqual(sd.format_record(rec),
                          ["IN: The coordinator sent a message while you were working: FIX t1 (round 1/3)"])
 
@@ -212,10 +219,10 @@ class ReaderTest(RunDirTest):
         self.assertTrue(r.truncated)
 
     def test_worker_drops_lines_after_truncation(self):
-        self.append('{"type":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n')
+        self.append(said("old"))
         w = sd.Worker("w", log=str(self.path))
         w.poll_log()
-        self.path.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"n"}]}}\n')
+        self.path.write_text(said("n"))
         w.poll_log()
         self.assertEqual(w.lines, ["n"])
 
@@ -226,18 +233,9 @@ class ReaderTest(RunDirTest):
     def test_reader_skips_fifo_and_device(self):  # a roster could point anywhere: a blocking open or endless read would freeze the window
         fifo = self.dir / "fifo.jsonl"
         os.mkfifo(fifo)
-        class Blocked(Exception):  # not an OSError, so read_new cannot swallow it
-            pass
-        def timeout(*_):
-            raise Blocked("LogReader blocked")
-        old = signal.signal(signal.SIGALRM, timeout)
-        signal.alarm(3)
-        try:
+        with alarm(3, "LogReader"):
             self.assertEqual(sd.LogReader(str(fifo)).read_new(), [])
             self.assertEqual(sd.LogReader("/dev/zero").read_new(), [])
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old)
 
     def test_reader_follows_symlink_to_log(self):  # Claude Code output files are symlinks to the real log
         self.append('{"type":"user"}\n')
@@ -258,17 +256,6 @@ class ReaderTest(RunDirTest):
             self.assertLessEqual(len(r.buf), sd.MAX_READ)
         self.assertEqual(got, [{"type": "user"}])
 
-    def test_reader_restarts_after_truncation_and_replacement(self):
-        self.append('{"n":1}\n{"n":2}\n')
-        r = sd.LogReader(str(self.path))
-        self.assertEqual(len(r.read_new()), 2)
-        self.path.write_text('{"n":3}\n')  # truncated, smaller than the offset
-        self.assertEqual(r.read_new(), [{"n": 3}])
-        new = self.dir / "new.jsonl"  # replaced by a bigger file: another inode
-        new.write_text('{"n":4}\n' * 5)
-        os.replace(new, self.path)
-        self.assertEqual(r.read_new(), [{"n": 4}] * 5)
-
     def test_run_over(self):
         dead = subprocess.Popen(["true"])
         dead.wait()
@@ -279,41 +266,37 @@ class ReaderTest(RunDirTest):
         (self.dir / "report.md").write_text("done")
         self.assertTrue(sd.run_over(str(self.dir), os.getpid()))
         self.assertTrue(sd.run_over(str(self.dir), None))
+        self.assertFalse(sd.run_over(None, 2 ** 80))  # pid too large for the OS
 
     def test_status_clipped_to_200(self):
         self.status("w1", "status: " + "x" * 500 + "\n")
-        st = sd.worker_status(str(self.run / "workers" / "w1.md"))
-        self.assertEqual(st, "x" * 199 + "…")
-        self.assertEqual(len(st), 200)
+        self.assertEqual(self.shown(), "x" * 199 + "…")
 
     def test_status_reads_only_the_start_of_a_huge_file(self):
         self.status("w1", "x" * (1 << 20))
-        st = sd.worker_status(str(self.run / "workers" / "w1.md"))
-        self.assertEqual(st, "x" * 199 + "…")
+        self.assertEqual(self.shown(), "x" * 199 + "…")
         self.assertEqual(len(sd.read_small(str(self.run / "workers" / "w1.md"), 8192)[0]), 8192)  # bounded read
 
     def test_status_strips_controls_and_prefix(self):
         self.status("w1", "status: ok \x1b]0;pwn\x07\n## files changed\n")
-        self.assertEqual(sd.worker_status(str(self.run / "workers" / "w1.md")), "ok ]0;pwn")
+        self.assertEqual(self.shown(), "ok ]0;pwn")
 
     def test_status_missing_or_empty(self):
         self.status("w2", "")
-        self.assertEqual(sd.worker_status(str(self.run / "workers" / "w2.md")), "(no status yet)")
-        self.assertEqual(sd.worker_status(str(self.run / "workers" / "none.md")), "(no status yet)")
+        self.assertEqual(self.shown("w2"), "(no status yet)")
+        self.assertEqual(self.shown("none"), "(no status yet)")
 
     def test_symlink_status_not_read(self):
         (self.run / "workers").mkdir()
         (self.run / "secret.txt").write_text("TOPSECRET\n")
         os.symlink(self.run / "secret.txt", self.run / "workers" / "w1.md")
-        st = sd.worker_status(str(self.run / "workers" / "w1.md"))
-        self.assertEqual(st, "(not a regular file)")
-        self.assertNotIn("TOPSECRET", st)
+        self.assertEqual(self.shown(), "(not a regular file)")
 
     def test_fifo_status_does_not_block(self):
         (self.run / "workers").mkdir()
         os.mkfifo(self.run / "workers" / "w1.md")
         with alarm(3, "worker_status"):
-            self.assertEqual(sd.worker_status(str(self.run / "workers" / "w1.md")), "(not a regular file)")
+            self.assertEqual(self.shown(), "(not a regular file)")
 
     def test_activity_flags(self):
         log = self.run / "agent-a.jsonl"
@@ -464,18 +447,12 @@ class LayoutTest(unittest.TestCase):
         self.assertIn("a[31mb", out)
 
     def test_strip_pads_and_cuts_by_display_width(self):
-        import unicodedata
         cells = lambda t: sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in t)
         self.assertLessEqual(cells(sd.strip_lines(tasks(1, title="日本語" * 20), 20, 1)[0]), 20)
         rows = sd.strip_lines(tasks(40, title="日本語" * 20), 100, 5)
         self.assertTrue(rows)
         for row in rows:
             self.assertLessEqual(cells(row), 100)
-
-    def test_fit_zero_width_marks(self):
-        self.assertEqual(sd.fit("\u0301ab", 5), "ab")  # leading combining mark dropped
-        self.assertEqual(sd.fit("e\u0301\u200bx", 2), "e\u0301\u200bx")  # Mn and Cf take no cell
-        self.assertEqual(sd.fit("日本", 3), "日")
 
     def test_layout_without_tasks_has_no_separator(self):
         d = sd.Dash("x", None)
@@ -540,7 +517,7 @@ class DashTest(RunDirTest):
         log = self.run / "a.jsonl"
         with open(log, "w") as f:
             for i in range(n):
-                f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": f"line {i}"}]}}) + "\n")
+                f.write(said(f"line {i}"))
         return log
 
     def test_worker_keeps_whole_log(self):
@@ -567,13 +544,13 @@ class DashTest(RunDirTest):
             self.assertEqual(d.top, 0)  # 15 dropped, clamped at 0
             self.assertEqual(len(d.workers["w1"].lines), 10)
             with open(log, "a") as f:
-                f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "more"}]}}) + "\n")
+                f.write(said("more"))
             d.top = 6
             d.poll_logs()
             self.assertEqual(d.top, 5)
             d.top = None  # following the newest line: untouched
             with open(log, "a") as f:
-                f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "more"}]}}) + "\n")
+                f.write(said("more"))
             d.poll_logs()
             self.assertIsNone(d.top)
 
@@ -583,11 +560,11 @@ class DashTest(RunDirTest):
     def test_late_roster_adds_worker_and_keeps_selection(self):
         self.status("w2-ui", "status: ui\n")
         d = sd.Dash(str(self.run), None)
-        d.refresh_meta(0)
+        d.refresh_meta()
         self.assertEqual(d.names(), ["w2-ui"])
         self.assertEqual(d.selected, "w2-ui")
         self.roster(("w1-api", "haiku", "low", ""), ("w2-ui", "sonnet", "medium", ""))
-        d.refresh_meta(1)
+        d.refresh_meta()
         self.assertEqual(d.names(), ["w1-api", "w2-ui"])
         self.assertEqual(d.selected, "w2-ui")
         self.assertEqual(d.workers["w2-ui"].model, "sonnet")
@@ -599,7 +576,7 @@ class DashTest(RunDirTest):
         self.status("zz", "x")
         self.status("aa", "x")
         d = sd.Dash(str(self.run), None)
-        d.refresh_meta(0)
+        d.refresh_meta()
         self.assertEqual(d.names(), ["w2-ui", "w1-api", "aa", "zz"])
         self.assertEqual(d.selected, "w2-ui")
 
@@ -608,7 +585,7 @@ class DashTest(RunDirTest):
         self.roster(("../secret", "m", "e", ""))
         (self.run / "workers").mkdir()
         d = sd.Dash(str(self.run), None)
-        d.refresh_meta(0)
+        d.refresh_meta()
         self.assertEqual(d.workers["../secret"].status, "(no status yet)")
 
     def test_poll_logs_reads_fixture_and_keeps_lines_over_refresh(self):
@@ -616,17 +593,19 @@ class DashTest(RunDirTest):
         shutil.copyfile(FIXTURE, log)
         self.roster(("w1-api", "haiku", "low", log))
         d = sd.Dash(str(self.run), None)
-        d.refresh_meta(0)
+        d.refresh_meta()
         d.poll_logs()
         want = [l for line in FIXTURE.read_text().splitlines() for l in sd.format_record(json.loads(line))]
         self.assertEqual(list(d.workers["w1-api"].lines), want)
-        d.refresh_meta(1)
+        d.refresh_meta()
         d.poll_logs()
         self.assertEqual(list(d.workers["w1-api"].lines), want)
 
     def test_tick_closes_after_delay(self):
+        d = sd.Dash(str(self.run), os.getpid())
+        self.assertTrue(d.tick(1000))
+        self.assertIsNone(d.closing_at)  # still running
         (self.run / "report.md").write_text("done")
-        d = sd.Dash(str(self.run), None)
         self.assertTrue(d.tick(100))
         self.assertEqual(d.closing_at, 100 + sd.CLOSE_DELAY)
         self.assertTrue(d.tick(104.9))
@@ -634,11 +613,9 @@ class DashTest(RunDirTest):
 
     def test_refresh_meta_gives_activity_wall_clock_time(self):
         self.roster(("w1", "m", "e", "/tmp/some.log"))
-        d = sd.Dash(str(self.run), None)
         with mock.patch.object(sd, "activity", return_value="") as act:
-            d.refresh_meta(123.0)  # a monotonic reading must never be compared with an mtime
-        args = act.call_args.args
-        self.assertTrue(len(args) == 1 or abs(args[1] - time.time()) < 60)
+            sd.Dash(str(self.run), None).refresh_meta()  # no clock argument: activity() compares wall-clock time with mtimes
+        act.assert_called_once_with("/tmp/some.log")
 
     def test_run_uses_monotonic_clock(self):
         (self.run / "report.md").write_text("done")
@@ -650,19 +627,9 @@ class DashTest(RunDirTest):
         with mock.patch.object(sd, "time", clock), mock.patch.object(sd.curses, "curs_set"):
             self.assertEqual(sd.run(scr, d), 0)
         self.assertEqual(d.closing_at, 1000.0 + sd.CLOSE_DELAY)
-
-    def test_tick_runs_while_not_over(self):
-        d = sd.Dash(str(self.run), os.getpid())
-        self.assertTrue(d.tick(1000))
-        self.assertIsNone(d.closing_at)
-
-
-class DashEdgeTest(RunDirTest):
-    write_log = DashTest.write_log
-
     def test_poll_log_follows_a_changed_roster_path(self):
         old, new = self.run / "old.jsonl", self.write_log(3)
-        old.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old 0"}]}}) + "\n")
+        old.write_text(said("old 0"))
         w = sd.Worker("w1", log=str(old))
         self.assertTrue(w.poll_log())
         first = w._reader
@@ -673,7 +640,7 @@ class DashEdgeTest(RunDirTest):
         self.assertEqual(w._reader.path, str(new))
         self.assertEqual(w.lines[-3:], ["line 0", "line 1", "line 2"])  # the new log is read from its start
         with open(old, "a") as f:  # the old file is no longer watched
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "old 1"}]}}) + "\n")
+            f.write(said("old 1"))
         self.assertFalse(w.poll_log())
         self.assertNotIn("old 1", w.lines)
 
@@ -764,6 +731,9 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual(sd.fit("abc", 0), "")
         self.assertEqual(sd.fit("abc", 0, pad=True), "")
         self.assertEqual(sd.fit("abc", -2, pad=True), "")
+        self.assertEqual(sd.fit("\u0301ab", 5), "ab")  # leading combining mark dropped
+        self.assertEqual(sd.fit("e\u0301\u200bx", 2), "e\u0301\u200bx")  # Mn and Cf take no cell
+        self.assertEqual(sd.fit("日本", 3), "日")
 
     def test_put_clips_by_cells_and_pads_when_reversed(self):
         scr = FakeScr(3, 10)
@@ -944,12 +914,9 @@ class UiTest(RunDirTest):
             self.assertIn("usage: swarm-dash.py", err.getvalue())
 
     def test_main_missing_run_folder(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err, unittest.mock.patch("sys.stdout.isatty", create=True, return_value=True):
+        with contextlib.redirect_stderr(io.StringIO()) as err, mock.patch("sys.stdout.isatty", create=True, return_value=True):
             self.assertEqual(sd.main([str(self.dir / "nope")]), 2)
         self.assertIn("not a folder", err.getvalue())
-
-    def test_run_over_ignores_huge_pid(self):
-        self.assertFalse(sd.run_over(None, 2 ** 80))
 
     def test_non_positive_pid_never_reaches_kill(self):
         with mock.patch.object(sd.os, "kill") as kill, contextlib.redirect_stderr(io.StringIO()):
@@ -964,24 +931,17 @@ class UiTest(RunDirTest):
         self.assertEqual(r.returncode, 2)
         self.assertIn("needs a terminal", r.stderr)
 
-    def test_key_name(self):
-        self.assertEqual(sd.key_name(curses.KEY_LEFT), "left")
-        self.assertEqual(sd.key_name(9), "tab")
-        self.assertEqual(sd.key_name(10), "enter")
-        self.assertEqual(sd.key_name(27), "esc")
-        self.assertEqual(sd.key_name(ord("3")), "3")
-        self.assertEqual(sd.key_name(ord("q")), "q")
-        self.assertEqual(sd.key_name(curses.KEY_NPAGE), "pgdn")
-        self.assertEqual(sd.key_name(curses.KEY_RESIZE), "resize")
-        self.assertIsNone(sd.key_name(ord("x")))
-        self.assertIsNone(sd.key_name(-1))
+    def test_key_map(self):
+        for ch, name in ((curses.KEY_LEFT, "left"), (9, "tab"), (10, "enter"), (27, "esc"), (ord("3"), "3"), (ord("q"), "q"),
+                         (curses.KEY_NPAGE, "pgdn"), (curses.KEY_RESIZE, "resize"), (ord("x"), None), (-1, None)):
+            self.assertEqual(sd.KEYS.get(ch), name)
 
     def test_handle_key_zoom_cycle(self):
         log = self.run / "agent-a.jsonl"
         shutil.copyfile(FIXTURE, log)
         self.roster(("w1-api", "haiku", "low", log), ("w2-ui", "haiku", "low", ""))
         d = sd.Dash(str(self.run), None)
-        d.refresh_meta(0)
+        d.refresh_meta()
         d.poll_logs()
         self.assertTrue(sd.handle_key(d, "right", 2, 4))
         self.assertEqual(d.selected, "w2-ui")

@@ -6,7 +6,6 @@ Exits when <run-folder>/report.md appears or <owner-pid> is gone, so its window 
 """
 import curses
 import errno
-import itertools
 import json
 import math
 import os
@@ -56,45 +55,39 @@ def summarize(name, inp):
     return json.dumps(inp, separators=(",", ":"))
 
 
+def _incoming(text):
+    m = AGENT_MSG.search(text)
+    return f"MSG from {m[1]}: {first_line(m[2])}" if m else f"IN: {head(text)}"
+
+
 def _lines(rec):
     kind = rec.get("type")
     if kind == "attachment":
         att = rec.get("attachment") or {}
-        if att.get("type") != "queued_command":
-            return []
-        prompt = str(att.get("prompt", ""))
-        m = AGENT_MSG.search(prompt)
-        return [f"MSG from {m[1]}: {first_line(m[2])}"] if m else [f"IN: {head(prompt)}"]
+        return [_incoming(str(att.get("prompt", "")))] if att.get("type") == "queued_command" else []
     content = (rec.get("message") or {}).get("content")
+    if kind == "user" and isinstance(content, str):
+        content = [{"type": "text", "text": content}]
     out = []
-    if kind == "user":
-        for item in [{"type": "text", "text": content}] if isinstance(content, str) else content if isinstance(content, list) else []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "text":
-                text = str(item.get("text", ""))
-                m = AGENT_MSG.search(text)
-                if m:
-                    out.append(f"MSG from {m[1]}: {first_line(m[2])}")
-                elif not text.startswith("<"):
-                    out.append(f"IN: {head(text)}")
-                continue
-            if item.get("type") != "tool_result":
-                continue
+    for item in content if isinstance(content, list) and kind in ("user", "assistant") else []:
+        if not isinstance(item, dict):
+            continue
+        typ = item.get("type")
+        if kind == "assistant":
+            if typ == "tool_use":
+                name = item.get("name")
+                out.append(f"-> {name}{' ' if name == 'SendMessage' else ': '}{summarize(name, item.get('input'))}")
+            elif typ == "text":
+                out += [l.strip() for l in item.get("text", "").splitlines() if l.strip()]
+        elif typ == "text":
+            text = str(item.get("text", ""))
+            if AGENT_MSG.search(text) or not text.startswith("<"):
+                out.append(_incoming(text))
+        elif typ == "tool_result":
             body = item.get("content")
             if isinstance(body, list):
                 body = "\n".join(x.get("text", "") for x in body if isinstance(x, dict))
             out.append(f"   {'!!' if item.get('is_error') else '<-'} {first_line(body or '')}")
-    elif kind == "assistant":
-        for item in content if isinstance(content, list) else []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "tool_use":
-                name = item.get("name")
-                sep = " " if name == "SendMessage" else ": "
-                out.append(f"-> {name}{sep}{summarize(name, item.get('input'))}")
-            elif item.get("type") == "text":
-                out += [l.strip() for l in item.get("text", "").splitlines() if l.strip()]
     return out
 
 
@@ -172,11 +165,9 @@ def worker_status(path):
         got = read_small(path, 8192)
         if got is None:
             return "(not a regular file)"
-        for line in got[0].decode(errors="replace").splitlines():
-            if line.strip():
-                text = line.strip()
-                text = CTRL.sub("", text[len("status:"):].strip() if text.startswith("status:") else text)
-                return text if len(text) <= MAX_LINE else text[:MAX_LINE - 1] + "…"
+        text = first_line(got[0].decode(errors="replace"))
+        if text:
+            return clip(text[len("status:"):].strip() if text.startswith("status:") else text)
     except OSError:
         pass
     return "(no status yet)"
@@ -298,10 +289,9 @@ class Dash:
 
     def names(self):
         """Roster order, then workers known only from a status file, by name."""
-        extra = sorted(n for n in self.workers if n not in self._order)
-        return [n for n in self._order if n in self.workers] + extra
+        return self._order + sorted(n for n in self.workers if n not in self._order)
 
-    def refresh_meta(self, now=None):  # now is unused: activity() compares wall-clock time with file mtimes
+    def refresh_meta(self):
         self.tasks = read_tasks(self.run_dir)
         roster = read_roster(self.run_dir)
         self._order = list(dict.fromkeys(r["name"] for r in roster))
@@ -338,9 +328,11 @@ def grid_shape(n, height, width):
     """(cols, rows) for n boxes, or None when no shape gives boxes of at least MIN_BOX_W x MIN_BOX_H."""
     best, best_score = None, 0
     for cols in range(1, n + 1):
-        box_w, box_h = width // cols, height // math.ceil(n / cols)
-        if box_w >= MIN_BOX_W and box_h >= MIN_BOX_H and min(box_w, 3 * box_h) > best_score:  # strict: ties keep fewer columns
-            best, best_score = (cols, math.ceil(n / cols)), min(box_w, 3 * box_h)
+        rows = math.ceil(n / cols)
+        box_w, box_h = width // cols, height // rows
+        score = min(box_w, 3 * box_h)
+        if box_w >= MIN_BOX_W and box_h >= MIN_BOX_H and score > best_score:  # strict: ties keep fewer columns
+            best, best_score = (cols, rows), score
     return best
 
 
@@ -394,29 +386,21 @@ def scroll(top, key, total, height):
     """New zoom scroll position; None follows the newest line."""
     bottom = max(0, total - height)
     cur = bottom if top is None else top
-    new = {"up": cur - 1 if top is not None else max(0, total - height - 1), "down": cur + 1, "pgup": cur - height,
-           "pgdn": cur + height, "home": 0, "end": bottom}.get(key, cur)
-    new = max(0, new)
-    return None if key == "end" or new >= total - height else new
+    new = max(0, {"up": cur - 1, "down": cur + 1, "pgup": cur - height, "pgdn": cur + height, "home": 0}.get(key, cur))
+    return None if key == "end" or new >= bottom else new
 
 
 def visible(lines, height, top):
     """The last `height` lines (top None) or the `height` lines from index `top`."""
     if height < 1:
         return []
-    if top is None:
-        return list(itertools.islice(reversed(lines), height))[::-1]
-    return list(itertools.islice(lines, top, top + height))
+    return lines[-height:] if top is None else lines[top:top + height]
 
 
 KEYS = {curses.KEY_LEFT: "left", curses.KEY_RIGHT: "right", curses.KEY_UP: "up", curses.KEY_DOWN: "down", 9: "tab",
         10: "enter", 13: "enter", curses.KEY_ENTER: "enter", 27: "esc", ord("q"): "q", curses.KEY_PPAGE: "pgup",
         curses.KEY_NPAGE: "pgdn", curses.KEY_HOME: "home", curses.KEY_END: "end", curses.KEY_RESIZE: "resize"}
 KEYS.update({ord(c): c for c in "123456789"})
-
-
-def key_name(ch):
-    return KEYS.get(ch)
 
 
 def fit(text, width, pad=False):
@@ -471,8 +455,8 @@ def draw(stdscr, dash, now):
         put(stdscr, 0, 0, "enlarge the window")
     elif dash.zoom in dash.workers:
         wk = dash.workers[dash.zoom]
-        head = " | ".join(p for p in (title(wk), wk.status + wk.flag) if p) + ("  " + closing_text(dash, now)).rstrip()
-        put(stdscr, 0, 0, head, curses.A_REVERSE)
+        bar = " | ".join(p for p in (title(wk), wk.status + wk.flag) if p) + ("  " + closing_text(dash, now)).rstrip()
+        put(stdscr, 0, 0, bar, curses.A_REVERSE)
         for i, line in enumerate(visible(wk.lines, h - 1, dash.top)):
             put(stdscr, 1 + i, 0, line)
     else:
@@ -529,7 +513,7 @@ def run(stdscr, dash):
     while True:
         now = time.monotonic()  # intervals and the close countdown must not follow clock jumps
         if now - last_meta >= 2:
-            dash.refresh_meta(now)
+            dash.refresh_meta()
             last_meta = now
         if now - last_log >= 0.5:
             dash.poll_logs()
@@ -537,7 +521,7 @@ def run(stdscr, dash):
         if not dash.tick(now):
             return 0
         draw(stdscr, dash, now)
-        key = key_name(stdscr.getch())
+        key = KEYS.get(stdscr.getch())
         if key:
             h, w = stdscr.getmaxyx()
             shape = layout(dash, h, w)[3]
