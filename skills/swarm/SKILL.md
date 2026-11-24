@@ -15,11 +15,11 @@ Arguments: `$ARGUMENTS`
 
 ## 1. Validate
 
-- First word a number, optionally followed by `w` (as in `4w`, which opens the dashboard): the full form `<workers>[w] <model> <effort> <task...>`, with the values in the usage text below.
+- First word all digits, optionally followed by `w` (as in `4` or `4w`, which opens the dashboard; `2fa` or `3rd-party` is not a count): the full form `<workers>[w] <model> <effort> <task...>`, with the values in the usage text below.
 - First word exactly `w`: the defaults, with the dashboard; the task follows.
 - Any other first word: the whole line is the task, with the defaults: one worker per task (at most 20), sonnet, medium, no dashboard.
 
-If the first word is a number and the rest doesn't fit the full form, or the task is empty, print exactly this and do nothing else:
+If the first word is a count outside 1-20, or the rest doesn't fit the full form, or the task is empty, print exactly this and do nothing else:
 
 ```
 Usage: /swarm [<workers>[w] <model> <effort>] <task...>
@@ -51,7 +51,7 @@ If valid, run one harmless Bash call (`pwd`), because the permission-mode note c
 - Pick a tier per task:
   - `swarm-worker` by default
   - `swarm-worker-web` when it needs online docs or lookups
-  - `general-purpose` only when it needs MCP tools or a skill. Paste the body of `~/.claude/agents/swarm-worker.md` (below its frontmatter) above its brief.
+  - `general-purpose` only when it needs MCP tools or a skill. Paste the body of `~/.claude/agents/swarm-worker.md` (below its frontmatter) above its brief; if that file is missing, use `<base>/../../agents/swarm-worker.md`.
 - One task: run one worker and say so. A tiny job: say that fewer workers would do.
 
 ## 3. Assign
@@ -60,6 +60,7 @@ If valid, run one harmless Bash call (`pwd`), because the permission-mode note c
 - Put chains of dependent tasks on one worker, so no worker waits on another.
 - Group same-tier tasks; a worker's tier must cover all of its tasks.
 - Starting briefs hold only tasks that can start now. Hold blocked tasks. When one becomes startable, send it with SendMessage to the best-fitting existing worker; that resumes it if it had finished. Never spawn for it.
+- If a task is marked `failed`, mark its `pending` dependents `failed` too, unless you resolve the blocker yourself.
 - Names: `w<N>-<slug>`, for example `w1-api`. The slug uses only lowercase letters, digits and hyphens, because names reach the dashboard and terminals.
 
 ## 4. Preview
@@ -106,23 +107,30 @@ Spawn with the Agent tool, in the background: `subagent_type` = the tier, `model
 
 ## 7. Roster and dashboard
 
-- Write `<run>/roster.md` from the spawn results: `| worker | agent id | model | effort | tasks | output file |`; `output file` is the log path the Agent tool returned. Add any worker spawned later. Agent IDs and paths stay out of chat.
+- Write `<run>/roster.md` from the spawn results: `| worker | agent id | model | effort | tasks | output file |`; `output file` is the log path the Agent tool returned. Write the agent id and the output file plain, without backticks. Add any worker spawned later. Agent IDs and paths stay out of chat.
 - Dashboard off: skip the rest of this step.
-- Dashboard on: open the dashboard in one Bash call. Keep `"$PPID"` literal: in that call it is the Claude Code process that runs the workers. It picks up roster rows added later.
+- Dashboard on: open the dashboard in one Bash call. The line passes the owner PID only when the Bash call's parent is the Claude Code process (`claude` or `node`); otherwise the dashboard closes when `report.md` is written. It picks up roster rows added later.
 
 ```bash
 B="<base>/scripts"
-bash "$B/open-window.sh" "swarm: <run folder name>" python3 "$B/swarm-dash.py" "<run>" "$PPID"
+owner=$PPID; case "$(ps -o comm= -p "$owner" 2>/dev/null)" in claude|*/claude|node|*/node) ;; *) owner= ;; esac
+bash "$B/open-window.sh" "swarm: <run folder name>" python3 "$B/swarm-dash.py" "<run>" ${owner:+"$owner"}
 ```
 
-- Exit 3 means no window could open; relay the printed `Run this to watch:` command to the user once. Any other nonzero exit: tell the user once and go on without the dashboard.
+- Exit 2 means the command was not found: tell the user python3 was not found.
+- Exit 3 means no window could open; relay the printed `Run this to watch:` command to the user once.
+- Any other nonzero exit: tell the user once and go on without the dashboard.
 
 ## 8. Wait and review
 
-- After each task a worker messages `main` with `DONE <task-id>`; after a fix, `FIXED <task-id>`. End your turn while waiting: messages and completion notices wake you.
+- After each task a worker messages `main` with `DONE <task-id>`; after a fix, `FIXED <task-id>`. After changing a done task's files at a peer's request, a worker sends `UPDATED <task-id>` and one line; review it like `FIXED` (status file, diff, check). End your turn while waiting: messages and completion notices wake you.
 - Reviews come before any other work, so no worker idles past its 5-minute cache. Review tasks that finish close together in one turn.
-- Per task, in one Bash call: read the worker's status file, run `python3 "$B/swarm-run.py" diff <run> <task-id>`, and run the acceptance check, reading only failure output (`2>&1 | tail -n 40`).
-- The diff includes new files. It ends with any changed path no task owns, or in your hub files: ask the workers by SendMessage which one changed it, and note it for the report. Files it marks as not shown: read them directly.
+- Per task, in one Bash call: read the worker's status file (`head -n 80`), run `python3 "$B/swarm-run.py" diff <run> <task-id>`, and run the acceptance check, reading only failure output:
+
+```bash
+out=$(<check> 2>&1); rc=$?; [ $rc -eq 0 ] || printf '%s\n' "$out" | tail -n 40; echo "check exit $rc"
+```
+- The diff includes new files. It ends with any changed path no task owns, or in your hub files, and with `CHANGED IN OTHER TASKS' FILES: ...` for edits to pending or done peers' files: for either, ask the workers by SendMessage which one changed it, and note it for the report. Files it marks as not shown: read them directly. If it says changes outside the tasks could not be checked, note that for the report.
 - Pass: status `done`. Fail: status `fixing`, add 1 to `fixes`, and send the same worker:
 
 ```
@@ -130,7 +138,7 @@ FIX <task-id> (round n/3)
 <file>:<line> — <problem> — <why it matters> — expected: <result>
 ```
 
-- After 3 rounds, fix it yourself or mark it `failed`, and say so in the report.
+- After 3 rounds, fix it yourself or mark it `failed` (cascading to its `pending` dependents, as in section 3), and say so in the report.
 - Never repeat worker output in chat. Never read worker logs; only the helper's cost step reads them.
 - A worker asks a question: answer it briefly by SendMessage.
 - A worker reports a denied action: tell it to pause that work, and ask the user. Never route the denied action to another worker.
@@ -140,29 +148,29 @@ FIX <task-id> (round n/3)
 
 ## 9. Final review
 
-When every worker task is `done`:
+When every worker task is `done` or `failed`:
 
-- Add the pinned lines to the hub files and set their rows to `done`.
+- Add the pinned lines of `done` tasks to the hub files and set those rows to `done`. Failed tasks add no lines.
 - Run the full test suite, build and lint where they exist.
 - Read all changes with `python3 "$B/swarm-run.py" diff <run>` for parts that don't fit together, bugs, error handling, code quality and security (input handling, secrets, injection, permissions). Read files marked NOT SHOWN directly.
-- A problem inside one worker's files: a FIX report to that worker. A problem spanning several workers' files: fix it yourself if it is a few lines; otherwise spawn one fixer worker (same model and effort) that owns those files; its changes are not in the snapshot, so read them with `git diff`.
+- A problem inside one worker's files: a FIX report to that worker. A problem spanning several workers' files: fix it yourself if it is a few lines; otherwise spawn one fixer worker (`swarm-worker` unless it needs web or MCP tools; same model and effort) that owns those files, and add it to `<run>/roster.md`. Its changes are not in the snapshot, so read them with `git diff`.
 - Repeat until clean, at most 3 rounds.
 - If the user's CLAUDE.md asks for a step after code changes, run it once now.
 
 ## 10. Report
 
-Run `python3 "$B/swarm-run.py" cost <run>`; if it fails, say so under Cost and invent no table. Write `<run>/report.md` last (it closes the dashboard) and give the same report in chat, under these headings:
+Run `python3 "$B/swarm-run.py" cost <run>`; if it exits non-zero, go on without the table and add a one-line note that no cost data was available. Write `<run>/report.md` last (it closes the dashboard) and give the same report in chat, under these headings:
 
 - **Result**
 - **Tasks**: per task, worker, status, fix rounds used
 - **Review findings and fixes**
 - **Checks**: each check, pass or fail, with the exact failure lines
 - **Unverified or left**
-- **Cost**: the helper's table and notes, unchanged
+- **Cost**: the helper's table and notes, unchanged (or the no-cost-data note)
 
 ## Stopping
 
-If the user says stop: TaskStop every running worker, mark open tasks `stopped`, and report what finished, with the cost table, in `<run>/report.md` too.
+If the user says stop: TaskStop every running worker, mark open tasks `stopped`, and report what finished, with the cost table, in `<run>/report.md` too. If `swarm-run.py cost` exits non-zero, still write `report.md`, with a one-line note that no cost data was available.
 
 ## Keep it cheap
 

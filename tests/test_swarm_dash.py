@@ -1,6 +1,7 @@
 import contextlib
 import curses
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -15,12 +16,16 @@ import time
 import unittest
 import unittest.mock
 import uuid
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "skills" / "swarm" / "scripts" / "swarm-dash.py"
 spec = importlib.util.spec_from_file_location("swarm_dash", SCRIPT)
 sd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sd)
+run_spec = importlib.util.spec_from_file_location("swarm_run", ROOT / "skills" / "swarm" / "scripts" / "swarm-run.py")
+sr = importlib.util.module_from_spec(run_spec)
+run_spec.loader.exec_module(sr)
 
 FIXTURE = ROOT / "tests" / "fixtures" / "worker-log.jsonl"
 ROSTER_HEAD = "| worker | agent id | model | effort | tasks | output file |\n|---|---|---|---|---|---|\n"
@@ -81,6 +86,31 @@ class FormatTest(unittest.TestCase):
                     {"type": "assistant", "message": {"content": "str"}},
                     {"type": "user", "message": {"content": [{"type": "tool_result"}]}}):
             self.assertIsInstance(sd.format_record(rec), list)
+
+    def test_non_dict_items_do_not_discard_the_record(self):
+        rec = {"type": "assistant", "message": {"content": [
+            "junk", None, {"type": "text", "text": "kept"}, {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}
+        self.assertEqual(sd.format_record(rec), ["kept", "-> Bash: ls"])
+        rec = {"type": "user", "message": {"content": [
+            3, {"type": "tool_result", "content": "ok"}, {"type": "text", "text": "hello"}]}}
+        self.assertEqual(sd.format_record(rec), ["   <- ok", "IN: hello"])
+        self.assertEqual(sd.format_record({"type": "user", "message": {"content": 5}}), [])
+
+    def test_user_string_agent_message_and_markup(self):
+        msg = {"type": "user", "message": {"content": '<agent-message from="ab12">\nPING\n</agent-message>'}}
+        self.assertEqual(sd.format_record(msg), ["MSG from ab12: PING"])
+        self.assertEqual(sd.format_record({"type": "user", "message": {"content": "<system>x</system>"}}), [])
+        self.assertEqual(sd.format_record({"type": "user", "message": {"content": "plain"}}), ["IN: plain"])
+
+    def test_web_tools_and_send_message_without_recipient(self):
+        def use(name, inp):
+            return sd.format_record({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
+        self.assertEqual(use("WebFetch", {"url": "http://x.test", "prompt": "p"}), ["-> WebFetch: http://x.test"])
+        self.assertEqual(use("WebSearch", {"query": "cats"}), ["-> WebSearch: cats"])
+        self.assertEqual(use("SendMessage", {"message": "hi"}), ["-> SendMessage to ?: hi"])
+
+    def test_clip_strips_bidi_and_line_separators(self):
+        self.assertEqual(sd.clip("a\u202eb\u2066c\u2069d\u2028e\u2029f"), "abcdef")
 
     def test_message_from_overseer_shows_its_first_line(self):
         rec = {"type": "user", "message": {"content":
@@ -177,6 +207,31 @@ class ReaderTest(RunDirTest):
         os.symlink(self.path, self.dir / "x.output")
         self.assertEqual(sd.LogReader(str(self.dir / "x.output")).read_new(), [{"type": "user"}])
 
+    def test_reader_reads_at_most_one_mib_per_call(self):
+        self.append(('{"type":"user"}\n' * (3 << 16)))  # 3 MiB
+        r = sd.LogReader(str(self.path))
+        self.assertGreater(len(r.read_new()), 0)
+        self.assertEqual(r.pos, sd.MAX_READ)
+
+    def test_reader_drops_endless_line(self):
+        self.append("x" * (5 * sd.MAX_READ // 2) + '\n{"type":"user"}\n')
+        r, got = sd.LogReader(str(self.path)), []
+        for _ in range(5):
+            got += r.read_new()
+            self.assertLessEqual(len(r.buf), sd.MAX_READ)
+        self.assertEqual(got, [{"type": "user"}])
+
+    def test_reader_restarts_after_truncation_and_replacement(self):
+        self.append('{"n":1}\n{"n":2}\n')
+        r = sd.LogReader(str(self.path))
+        self.assertEqual(len(r.read_new()), 2)
+        self.path.write_text('{"n":3}\n')  # truncated, smaller than the offset
+        self.assertEqual(r.read_new(), [{"n": 3}])
+        new = self.dir / "new.jsonl"  # replaced by a bigger file: another inode
+        new.write_text('{"n":4}\n' * 5)
+        os.replace(new, self.path)
+        self.assertEqual(r.read_new(), [{"n": 4}] * 5)
+
     def test_run_over(self):
         dead = subprocess.Popen(["true"])
         dead.wait()
@@ -193,6 +248,12 @@ class ReaderTest(RunDirTest):
         st = sd.worker_status(str(self.run / "workers" / "w1.md"))
         self.assertEqual(st, "x" * 199 + "…")
         self.assertEqual(len(st), 200)
+
+    def test_status_reads_only_the_start_of_a_huge_file(self):
+        self.status("w1", "x" * (1 << 20))
+        st = sd.worker_status(str(self.run / "workers" / "w1.md"))
+        self.assertEqual(st, "x" * 199 + "…")
+        self.assertEqual(len(sd.read_small(str(self.run / "workers" / "w1.md"), 8192)[0]), 8192)  # bounded read
 
     def test_status_strips_controls_and_prefix(self):
         self.status("w1", "status: ok \x1b]0;pwn\x07\n## files changed\n")
@@ -227,6 +288,24 @@ class ReaderTest(RunDirTest):
         self.assertEqual(sd.activity("", now), "")
         self.assertEqual(sd.activity(str(self.run / "missing.jsonl"), now), "")
 
+    def test_finished_flag_ignored_when_log_is_newer(self):  # worker resumed after it finished
+        log, meta = self.run / "agent-a.jsonl", self.run / "agent-a.meta.json"
+        meta.write_text('{"finished": true}')
+        log.write_text("{}\n")
+        os.utime(meta, (1000, 1000))
+        os.utime(log, (2000, 2000))
+        self.assertEqual(sd.activity(str(log), 2001), "")
+        self.assertEqual(sd.activity(str(log), 2005), " (finished)")  # quiet for 5 s: it really stopped
+        os.utime(meta, (2000, 2000))
+        self.assertEqual(sd.activity(str(log), 2001), " (finished)")
+
+    def test_symlinked_meta_not_read(self):
+        log = self.run / "agent-a.jsonl"
+        log.write_text("{}\n")
+        (self.run / "secret.json").write_text('{"finished": true}')
+        os.symlink(self.run / "secret.json", self.run / "agent-a.meta.json")
+        self.assertEqual(sd.activity(str(log), log.stat().st_mtime + 330), " (quiet 5m)")
+
     def test_activity_flags_quiet_worker_from_roster(self):
         log = self.run / "agent-a.jsonl"
         log.write_text("{}\n")
@@ -252,6 +331,18 @@ class ReaderTest(RunDirTest):
         got = sd.read_roster(str(self.run))
         self.assertEqual([r["name"] for r in got], ["w2-ui", "w1-api"])
         self.assertEqual(got[0], {"name": "w2-ui", "model": "sonnet", "effort": "medium", "log": "/tmp/x.log"})
+
+    def test_read_roster_skips_empty_names_and_strips_backticks(self):
+        self.roster(("", "m", "e", "/tmp/a"), ("  ", "m", "e", "/tmp/b"), ("w1", "m", "e", " `/tmp/c d.log` "))
+        self.assertEqual(sd.read_roster(str(self.run)), [{"name": "w1", "model": "m", "effort": "e", "log": "/tmp/c d.log"}])
+
+    def test_parse_table_edges_and_first_table_only(self):
+        header, rows = sd.parse_table("| a | b |\n|---|---|\n| 1 | 2 ||\n|| 3 | 4 |\n| 5 | x\\| |\n\ntext\n| c |\n|---|\n| 9 |\n")
+        self.assertEqual(header, ["a", "b"])
+        self.assertEqual(rows, [["1", "2", ""], ["", "3", "4"], ["5", "x|"]])
+
+    def test_parse_table_same_as_swarm_run(self):
+        self.assertEqual(inspect.getsource(sd.parse_table), inspect.getsource(sr.parse_table))
 
     def test_read_roster_missing_or_bad_header(self):
         self.assertEqual(sd.read_roster(str(self.run)), [])
@@ -309,6 +400,29 @@ class LayoutTest(unittest.TestCase):
         self.assertNotIn("\x9b", out)
         self.assertIn("a[31mb", out)
 
+    def test_strip_pads_and_cuts_by_display_width(self):
+        import unicodedata
+        cells = lambda t: sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in t)
+        self.assertLessEqual(cells(sd.strip_lines(tasks(1, title="日本語" * 20), 20, 1)[0]), 20)
+        rows = sd.strip_lines(tasks(40, title="日本語" * 20), 100, 5)
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertLessEqual(cells(row), 100)
+
+    def test_fit_zero_width_marks(self):
+        self.assertEqual(sd.fit("\u0301ab", 5), "ab")  # leading combining mark dropped
+        self.assertEqual(sd.fit("e\u0301\u200bx", 2), "e\u0301\u200bx")  # Mn and Cf take no cell
+        self.assertEqual(sd.fit("日本", 3), "日")
+
+    def test_layout_without_tasks_has_no_separator(self):
+        d = sd.Dash("x", None)
+        d.workers = {"w1": sd.Worker("w1")}
+        d._order = ["w1"]
+        strip, top, body, _ = sd.layout(d, 30, 80)
+        self.assertEqual((strip, top, body), ([], 0, 30))
+        d.closing_at = 5
+        self.assertEqual(sd.layout(d, 30, 80)[1], 2)
+
     def test_move(self):
         names = ["a", "b", "c", "d", "e"]
         self.assertEqual(sd.move(names, "a", "right", 2), "b")
@@ -349,16 +463,46 @@ class LayoutTest(unittest.TestCase):
 
 
 class DashTest(RunDirTest):
-    def test_worker_keeps_whole_log(self):
+    def write_log(self, n):
         log = self.run / "a.jsonl"
         with open(log, "w") as f:
-            for i in range(20005):
+            for i in range(n):
                 f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": f"line {i}"}]}}) + "\n")
-        w = sd.Worker("w1", "haiku", "low", str(log))
-        self.assertTrue(w.poll_log())
+        return log
+
+    def test_worker_keeps_whole_log(self):
+        w = sd.Worker("w1", "haiku", "low", str(self.write_log(20005)))
+        while w.poll_log():  # each poll reads at most 1 MiB
+            pass
         self.assertEqual(len(w.lines), 20005)
         self.assertEqual((w.lines[0], w.lines[-1]), ("line 0", "line 20004"))
         self.assertFalse(w.poll_log())
+
+    def test_worker_lines_capped_dropping_oldest(self):
+        with mock.patch.object(sd, "MAX_LOG_LINES", 10):
+            w = sd.Worker("w1", "haiku", "low", str(self.write_log(25)))
+            self.assertTrue(w.poll_log())
+        self.assertEqual((w.lines[0], w.lines[-1], len(w.lines), w.dropped), ("line 15", "line 24", 10, 15))
+
+    def test_zoomed_scroll_follows_dropped_lines(self):
+        log = self.write_log(25)
+        d = sd.Dash(str(self.run), None)
+        d.workers = {"w1": sd.Worker("w1", log=str(log)), "w2": sd.Worker("w2")}
+        with mock.patch.object(sd, "MAX_LOG_LINES", 10):
+            d.zoom, d.top = "w1", 12
+            d.poll_logs()
+            self.assertEqual(d.top, 0)  # 15 dropped, clamped at 0
+            self.assertEqual(len(d.workers["w1"].lines), 10)
+            with open(log, "a") as f:
+                f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "more"}]}}) + "\n")
+            d.top = 6
+            d.poll_logs()
+            self.assertEqual(d.top, 5)
+            d.top = None  # following the newest line: untouched
+            with open(log, "a") as f:
+                f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "more"}]}}) + "\n")
+            d.poll_logs()
+            self.assertIsNone(d.top)
 
     def test_worker_without_log(self):
         self.assertFalse(sd.Worker("w1").poll_log())
@@ -415,6 +559,25 @@ class DashTest(RunDirTest):
         self.assertTrue(d.tick(104.9))
         self.assertFalse(d.tick(105))
 
+    def test_refresh_meta_gives_activity_wall_clock_time(self):
+        self.roster(("w1", "m", "e", "/tmp/some.log"))
+        d = sd.Dash(str(self.run), None)
+        with mock.patch.object(sd, "activity", return_value="") as act:
+            d.refresh_meta(123.0)  # a monotonic reading must never be compared with an mtime
+        args = act.call_args.args
+        self.assertTrue(len(args) == 1 or abs(args[1] - time.time()) < 60)
+
+    def test_run_uses_monotonic_clock(self):
+        (self.run / "report.md").write_text("done")
+        d = sd.Dash(str(self.run), None)
+        scr = mock.MagicMock()
+        scr.getmaxyx.return_value = (24, 80)
+        scr.getch.return_value = ord("q")
+        clock = mock.Mock(monotonic=lambda: 1000.0, time=lambda: 5.0)
+        with mock.patch.object(sd, "time", clock), mock.patch.object(sd.curses, "curs_set"):
+            self.assertEqual(sd.run(scr, d), 0)
+        self.assertEqual(d.closing_at, 1000.0 + sd.CLOSE_DELAY)
+
     def test_tick_runs_while_not_over(self):
         d = sd.Dash(str(self.run), os.getpid())
         self.assertTrue(d.tick(1000))
@@ -423,7 +586,7 @@ class DashTest(RunDirTest):
 
 class UiTest(RunDirTest):
     def test_main_usage_errors(self):
-        for argv in ([], ["a", "b", "c"], ["run", "notapid"]):
+        for argv in ([], ["a", "b", "c"], ["run", "notapid"], ["run", "0"], ["run", "-1"]):
             with contextlib.redirect_stderr(io.StringIO()) as err:
                 self.assertEqual(sd.main(argv), 2)
             self.assertIn("usage: swarm-dash.py", err.getvalue())
@@ -435,6 +598,14 @@ class UiTest(RunDirTest):
 
     def test_run_over_ignores_huge_pid(self):
         self.assertFalse(sd.run_over(None, 2 ** 80))
+
+    def test_non_positive_pid_never_reaches_kill(self):
+        with mock.patch.object(sd.os, "kill") as kill, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(sd.main([str(self.run), "0"]), 2)
+            self.assertEqual(sd.main([str(self.run), "-1"]), 2)
+            self.assertFalse(sd.run_over(str(self.run), -1))
+            self.assertFalse(sd.run_over(str(self.run), 0))
+        kill.assert_not_called()
 
     def test_main_needs_terminal(self):
         r = subprocess.run([sys.executable, str(SCRIPT), str(self.run)], capture_output=True, text=True)

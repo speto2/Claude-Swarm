@@ -1,4 +1,5 @@
 import contextlib
+import sys
 import importlib.util
 import io
 import json
@@ -98,7 +99,8 @@ class GitRunTest(TempDirTest):
         self.assertIn("== src/api.py: modified (+1 -1)", out)
         self.assertIn("+    return 2", out)
         self.assertIn("== src/new.py: new (+1 -0)", out)
-        self.assertNotIn("a b.md", out)
+        self.assertNotIn("== docs/a b.md", out)  # t2's file: reported only as a peer change, not diffed
+        self.assertIn("CHANGED IN OTHER TASKS' FILES: docs/a b.md (t2 pending)", out)
         self.assertIn("CHANGED IN main's FILES: hub.py", out)
         self.assertIn("CHANGED OUTSIDE EVERY TASK: dirty.txt, other.py", out)
         code, out, _ = run_main(["diff", self.run_dir])
@@ -259,6 +261,254 @@ class CostTest(unittest.TestCase):
     def test_usage_errors(self):
         for argv in ([], ["init", "x"], ["diff"], ["cost"], ["bogus"]):
             self.assertEqual(run_main(argv)[0], 2, argv)
+
+
+
+class ParseTableTest(unittest.TestCase):
+    def test_edge_cells_and_escaped_pipes(self):
+        h, rows = sr.parse_table("| a | b | c |\n|---|---|---|\n| x | y ||\n|| x | y |\n| p \\| q | r\\| |  |\n")
+        self.assertEqual(h, ["a", "b", "c"])
+        self.assertEqual(rows, [["x", "y", ""], ["", "x", "y"], ["p | q", "r|", ""]])
+
+    def test_only_first_table(self):
+        h, rows = sr.parse_table("intro\n| a | b |\n|--|--|\n| 1 | 2 |\n\ntext\n| c | d |\n| 3 | 4 |\n")
+        self.assertEqual((h, rows), (["a", "b"], [["1", "2"]]))
+
+
+class SafetyTest(GitRunTest):
+    def paths(self):
+        return pathlib.Path(self.run_dir)
+
+    def test_init_rejects_symlink_escaping_root(self):
+        (self.base / "secret.txt").write_text("secret\n")
+        (self.root / "src" / "esc.py").symlink_to(self.base / "secret.txt")
+        before = sorted(os.listdir(self.root / ".swarm" / "runs"))
+        code, _, err = run_main(["init"], "| id | files |\n| t1 | src/esc.py |\n")
+        self.assertEqual(code, 1)
+        self.assertIn("src/esc.py resolves outside the project", err)
+        self.assertEqual(sorted(os.listdir(self.root / ".swarm" / "runs")), before)
+
+    def test_init_snapshot_failure_removes_run_folder(self):
+        before = sorted(os.listdir(self.root / ".swarm" / "runs"))
+        with mock.patch.object(sr, "snapshot_file", side_effect=PermissionError(13, "denied")):
+            code, out, err = run_main(["init"], TABLE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("denied", err)
+        self.assertEqual(sorted(os.listdir(self.root / ".swarm" / "runs")), before)
+
+    def test_fifo_at_owned_path_does_not_hang(self):
+        os.remove(self.root / "src" / "api.py")
+        os.mkfifo(self.root / "src" / "api.py")
+        self.assertIsNone(sr.read_bytes(self.root / "src" / "api.py"))
+        self.assertEqual(sr.file_hash(self.root / "src" / "api.py"), "special")
+        code, out, _ = run_main(["diff", self.run_dir, "t1"])
+        self.assertEqual(code, 0)
+        self.assertIn("== src/api.py: special file", out)
+
+    def test_symlink_at_owned_path_is_not_followed(self):
+        (self.base / "secret.txt").write_text("TOPSECRET\n")
+        os.remove(self.root / "src" / "api.py")
+        (self.root / "src" / "api.py").symlink_to(self.base / "secret.txt")
+        self.assertIsNone(sr.read_bytes(self.root / "src" / "api.py"))
+        code, out, _ = run_main(["diff", self.run_dir, "t1"])
+        self.assertEqual(code, 0)
+        self.assertIn("== src/api.py: symlink -> ", out)
+        self.assertNotIn("TOPSECRET", out)
+
+    def test_large_file_compared_by_hash(self):
+        big, snap = self.root / "src" / "api.py", self.paths() / "snapshot" / "src" / "api.py"
+        with mock.patch.object(sr, "MAX_READ", 16):
+            self.assertIs(sr.read_bytes(big), sr.LARGE)
+            self.assertEqual(sr.file_diff(snap, big, "src/api.py"), (None, []))  # same bytes as the snapshot
+            big.write_text("def a():\n    return 'a much longer line than sixteen bytes'\n")
+            self.assertEqual(sr.file_diff(snap, big, "src/api.py"), ("== src/api.py: modified, too large to diff", []))
+
+    def test_tampered_snapshot_paths_rejected(self):
+        snap_path = self.paths() / "snapshot.json"
+        good = snap_path.read_text()
+        for bad, why in (("../secret", "contains .."), ("/etc/passwd", "outside"), (".swarm/runs/x", ".swarm"), ("a/../../b", "contains ..")):
+            snap = json.loads(good)
+            snap["owned"]["t1"].append(bad)
+            snap_path.write_text(json.dumps(snap))
+            code, out, err = run_main(["diff", self.run_dir, "t1"])
+            self.assertEqual((code, out), (1, ""), bad)
+            self.assertIn(bad, err)
+            self.assertIn(why, err)
+        (self.root / "link").symlink_to(self.base)  # a folder component that leaves the project
+        snap = json.loads(good)
+        snap["owned"]["t1"].append("link/x")
+        snap_path.write_text(json.dumps(snap))
+        self.assertEqual(run_main(["diff", self.run_dir, "t1"])[0], 1)
+
+    def test_peer_check_pending_and_done(self):
+        (self.root / "docs" / "a b.md").write_text("by t1\n")
+        out = run_main(["diff", self.run_dir, "t1"])[1]
+        self.assertIn("CHANGED IN OTHER TASKS' FILES: docs/a b.md (t2 pending)", out)
+        reviewed = json.loads((self.paths() / "reviewed.json").read_text())
+        self.assertEqual(sorted(reviewed["t1"]), ["src/api.py", "src/new.py"])
+        run_main(["diff", self.run_dir, "t2"])  # t2 reviewed with its file as it is now
+        tasks = (self.paths() / "tasks.md").read_text().replace("| t2 | docs | w2-docs | pending", "| t2 | docs | w2-docs | done")
+        (self.paths() / "tasks.md").write_text(tasks)
+        self.assertNotIn("OTHER TASKS", run_main(["diff", self.run_dir, "t1"])[1])  # unchanged since t2's review
+        (self.root / "docs" / "a b.md").write_text("by t1 again\n")
+        self.assertIn("(t2 done)", run_main(["diff", self.run_dir, "t1"])[1])
+        reviewed = json.loads((self.paths() / "reviewed.json").read_text())
+        self.assertIn("t1", reviewed)  # merged, not replaced
+        self.assertIn("t2", reviewed)
+
+    def test_peer_check_skips_done_task_without_review(self):
+        tasks = (self.paths() / "tasks.md").read_text().replace("| t2 | docs | w2-docs | pending", "| t2 | docs | w2-docs | done")
+        (self.paths() / "tasks.md").write_text(tasks)
+        (self.root / "docs" / "a b.md").write_text("changed\n")
+        self.assertNotIn("OTHER TASKS", run_main(["diff", self.run_dir, "t1"])[1])
+
+    def test_hub_check_excludes_the_task_itself(self):
+        (self.root / "hub.py").write_text("ROUTES = [1]\n")
+        self.assertNotIn("CHANGED IN main's FILES", run_main(["diff", self.run_dir, "h1"])[1])
+
+    def test_git_status_failure_is_reported(self):
+        with mock.patch.object(sr, "git", return_value=subprocess.CompletedProcess([], 128, b"", b"fatal")):
+            self.assertIsNone(sr.dirty_files(self.root))
+            code, out, _ = run_main(["diff", self.run_dir])
+        self.assertEqual(code, 0)
+        self.assertIn("changes outside the tasks' files not checked: git status failed", out)
+        self.assertNotIn("nothing changed", out)
+
+    def test_init_with_failing_git_status_warns_and_stores_null(self):
+        real = sr.git
+        fake = lambda root, *a: subprocess.CompletedProcess([], 128, b"", b"") if a[0] == "status" else real(root, *a)
+        with mock.patch.object(sr, "git", fake):
+            code, out, err = run_main(["init"], TABLE)
+        self.assertEqual(code, 0)
+        self.assertIn("git status failed", err)
+        run = pathlib.Path(out.strip())
+        self.assertIsNone(json.loads((run / "snapshot.json").read_text())["dirty"])
+        code, out, _ = run_main(["diff", str(run)])
+        self.assertIn("changes outside the tasks' files not checked: git status failed", out)
+        self.assertNotIn("nothing changed", out)
+
+    def test_init_stores_started_at(self):
+        snap = json.loads((self.paths() / "snapshot.json").read_text())
+        self.assertIsNotNone(sr.parse_ts(snap["started_at"]))
+
+    def test_non_utf8_path_does_not_crash_diff(self):
+        name = b"bad\xff.txt"
+        try:
+            with open(os.path.join(os.fsencode(self.root), name), "w") as f:
+                f.write("x")
+        except OSError:
+            self.skipTest("file system rejects non-UTF-8 names")
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")  # strict stdout, as on a UTF-8 terminal
+        r = subprocess.run([sys.executable, str(ROOT / "skills" / "swarm" / "scripts" / "swarm-run.py"), "diff", self.run_dir],
+                           cwd=self.root, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(b"bad\\udcff.txt", r.stdout)
+
+    def test_file_diff_explains_invisible_changes(self):
+        f = self.root / "src" / "api.py"
+        f.write_bytes(b"def a():\r\n    return 1\r\n")
+        self.assertIn("(+0 -0; line endings changed)", run_main(["diff", self.run_dir, "t1"])[1])
+        f.write_bytes(b"def a():\n    return 1")
+        self.assertIn("(+0 -0; trailing newline changed)", run_main(["diff", self.run_dir, "t1"])[1])
+        f.write_bytes(b"def a():\n    return \xfe\n")
+        (self.paths() / "snapshot" / "src" / "api.py").write_bytes(b"def a():\n    return \xff\n")
+        self.assertIn("only non-UTF-8 bytes changed", run_main(["diff", self.run_dir, "t1"])[1])
+
+    def test_file_replaced_by_directory(self):
+        os.remove(self.root / "src" / "api.py")
+        (self.root / "src" / "api.py").mkdir()
+        self.assertIn("== src/api.py: directory", run_main(["diff", self.run_dir, "t1"])[1])
+
+
+class PriceTest(unittest.TestCase):
+    def test_lookup_price(self):
+        sonnet = sr.PRICES["claude-sonnet-5-5"]
+        for model in ("claude-sonnet-5-5", "claude-sonnet-5-5-20261101", "anthropic/claude-sonnet-5-5", "anthropic.claude-sonnet-5-5-20261101-v1:0",
+                      "us.anthropic.claude-sonnet-5-5-v1:0", "claude-sonnet-5-5[1m]", "claude-sonnet-5-5@20261101", "claude-sonnet-5-5-preview"):
+            self.assertEqual(sr.lookup_price(model), sonnet, model)
+        self.assertEqual(sr.lookup_price("claude-haiku-5-5-20261101"), sr.PRICES["claude-haiku-5-5"])
+        for model in ("claude-future-9", "?", "<synthetic>"):
+            self.assertIsNone(sr.lookup_price(model), model)
+
+    def test_tally_keeps_final_streaming_output(self):
+        a = rec("assistant", "t", mid="m", model="claude-opus-5-5", usage=usage(10, 0, 0, 4))
+        b = rec("assistant", "t", mid="m", model="claude-opus-5-5", usage=usage(10, 0, 0, 500))
+        for order in ([a, b], [b, a]):
+            t = sr.tally(order)
+            self.assertEqual((t["requests"], t["output"]), (1, 500))
+        t = sr.tally([rec("assistant", "t", mid=None, model="claude-opus-5-5", usage=usage(1, 0, 0, 1))] * 2)
+        self.assertEqual(t["requests"], 2)  # no id: each record counts
+
+    def test_tally_survives_malformed_usage(self):
+        bad = rec("assistant", "t", mid="m", model="claude-opus-5-5",
+                  usage={"input_tokens": "x", "output_tokens": [1], "cache_creation_input_tokens": 5, "cache_creation": 7, "cache_read_input_tokens": None})
+        t = sr.tally([bad, {"type": "assistant", "message": "text"}, {"type": "assistant", "message": {"usage": []}},
+                      rec("assistant", "t", mid=["unhashable"], model=3, usage=usage(1, 0, 0, 1))])
+        self.assertEqual((t["requests"], t["write"], t["input"]), (2, 5, 1))
+        self.assertTrue(t["unpriced"])  # model 3 -> "?"
+
+    def test_swarm_command_must_open_the_message(self):
+        cmd = "<command-message>swarm</command-message>\n" + sr.SWARM_COMMAND
+        self.assertTrue(sr.is_swarm_command(rec("user", "t", cmd)))
+        self.assertTrue(sr.is_swarm_command(rec("user", "t", [{"type": "text", "text": "  " + sr.SWARM_COMMAND}])))
+        self.assertFalse(sr.is_swarm_command(rec("user", "t", "I wrote " + sr.SWARM_COMMAND)))
+        self.assertFalse(sr.is_swarm_command(rec("user", "t", [{"type": "tool_result", "content": sr.SWARM_COMMAND}])))
+
+    def test_parse_ts(self):
+        z, frac, naive = sr.parse_ts("2026-11-23T07:00:00Z"), sr.parse_ts("2026-11-23T07:00:00.5+00:00"), sr.parse_ts("2026-11-23T07:00:00")
+        self.assertLess(z, frac)
+        self.assertEqual(z, naive)
+        self.assertEqual(sr.parse_ts("2026-11-23T09:00:00+02:00"), z)
+        self.assertIsNone(sr.parse_ts("garbage"))
+        self.assertIsNone(sr.parse_ts(None))
+
+
+class CostRunsTest(CostTest):
+    def snapshot(self, started_at):
+        (self.run_dir / "snapshot.json").write_text(json.dumps({"started_at": started_at}))
+
+    def test_cost_of_the_first_run_in_a_session(self):
+        self.snapshot("2026-11-23T06:00:30+00:00")
+        code, out, err = run_main(["cost", str(self.run_dir)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("| overseer | claude-opus-5-5 | 1 | 1 | 1 | 1 | 9,999 |", out)  # not the second run's m1
+        self.assertIn("| other: ccc | claude-haiku-5-5 |", out)  # started inside the first run's window
+        self.assertNotIn("Explore", out)  # started in the second
+
+    def test_cost_second_run_by_started_at_and_fallback(self):
+        for started in ("2026-11-23T07:00:10Z", None, "garbage", "2026-11-23T05:00:00Z"):
+            self.snapshot(started)
+            out = run_main(["cost", str(self.run_dir)])[1]
+            self.assertIn("| overseer | claude-opus-5-5 | 1 | 10 | 1,000 | 100,000 | 500 |", out, started)
+            self.assertIn("other: Explore", out)
+
+    def test_total_marks_unpriced(self):
+        out = run_main(["cost", str(self.run_dir)])[1]
+        self.assertRegex(out, r"\| total \| .* \| \$\d+\.\d\d\+\? \|")
+
+    def test_roster_with_backticks_and_log_outside_subagents(self):
+        sess = self.base / "projects" / "p" / "sess"
+        elsewhere = self.base / "elsewhere" / "zzz.jsonl"
+        write_log(elsewhere, [rec("assistant", "2026-11-23T07:02:00.000Z", mid="z1", model="claude-haiku-5-5", usage=usage(7, 0, 0, 3))])
+        (self.run_dir / "roster.md").write_text(
+            "| worker | agent id | output file |\n|---|---|---|\n"
+            f"| `w9-out` | `zzz` | `{elsewhere}` |\n"
+            f"| `w1-api` | `aaa` | `{sess / 'subagents' / 'agent-aaa.jsonl'}` |\n")
+        code, out, err = run_main(["cost", str(self.run_dir)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("| w9-out | claude-haiku-5-5 | 1 | 7 | 0 | 0 | 3 |", out)
+        self.assertIn("| w1-api | claude-sonnet-5-5 | 1 | 2 |", out)
+        self.assertIn("| overseer |", out)  # session found through the log in subagents/
+        self.assertEqual(out.count("| w1-api"), 1)  # not counted again by the agent-*.jsonl scan
+
+    def test_label_cannot_break_the_table(self):
+        meta = self.base / "projects" / "p" / "sess" / "subagents" / "agent-bbb.meta.json"
+        meta.write_text(json.dumps({"agentType": "Ex|plore\nx| y\x1b[31m"}))
+        out = run_main(["cost", str(self.run_dir)])[1]
+        self.assertIn("| other: Ex\\|plorex\\| y[31m | claude-future-9 |", out)
+        for line in out.splitlines():
+            if line.startswith("| other"):
+                self.assertEqual(len(sr.CELL_SPLIT.split(line.strip().strip("|"))), 8)
 
 
 if __name__ == "__main__":
