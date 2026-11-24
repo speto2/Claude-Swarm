@@ -18,7 +18,7 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 
 - Claude Code 2.1.292 or later
 - Auto mode. Workers run in the background, where nobody can approve a prompt, so `/swarm` refuses to start without it.
-- Python 3 (standard library only)
+- Linux (macOS not supported yet: GNU `ln -sT`, dashboard); Python 3, standard library only
 - Git is optional. Without it, the review cannot catch a worker editing files outside its tasks.
 - For the dashboard: Linux with X11 or Wayland and one of xfce4-terminal, x-terminal-emulator, gnome-terminal, konsole, kitty or xterm. Without one, the overseer prints the command to run instead.
 
@@ -53,7 +53,7 @@ ln -sT "$PWD/agents/swarm-worker.md" ~/.claude/agents/swarm-worker.md
 ln -sT "$PWD/agents/swarm-worker-web.md" ~/.claude/agents/swarm-worker-web.md
 ```
 
-`ln -sT` refuses to create a link when the path already exists, so it never nests inside an existing directory or overwrites anything. To reinstall, run the uninstall line first. The links point into this repository, so keep it where you installed it from.
+`ln -sT` refuses to create a link when the path already exists, so it never nests inside an existing directory or overwrites anything. To reinstall, run the uninstall line first (see Uninstall). The links point into this repository, so keep it where you installed it from.
 
 Start a new Claude Code session afterwards: agent definitions are loaded when a session starts.
 

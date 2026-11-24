@@ -100,24 +100,33 @@ class LogReader:
         self.path = path
         self.pos = 0
         self.buf = b""
+        self.tail = b""  # last bytes read, re-read each poll: a mismatch means the file was cut or rewritten
+        self.truncated = False  # set by read_new when the file shrank or was rewritten and reading restarted
 
     def read_new(self):
+        self.truncated = False
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)  # roster paths are untrusted: a FIFO would block open() forever
             with os.fdopen(fd, "rb") as f:
-                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):  # FIFO or device: never a worker log
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode):  # FIFO or device: never a worker log
                     return []
+                if self.tail:
+                    f.seek(self.pos - len(self.tail))
+                    if f.read(len(self.tail)) != self.tail:  # short read past a cut end, or new bytes: start over
+                        self.pos, self.buf, self.tail, self.truncated = 0, b"", b"", True
                 f.seek(self.pos)
                 data = f.read()
         except OSError:
             return []
         self.pos += len(data)
+        self.tail = (self.tail + data)[-256:]
         *lines, self.buf = (self.buf + data).split(b"\n")
         out = []
         for line in lines:
             try:
                 rec = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):  # RecursionError: absurdly nested line
                 continue
             if isinstance(rec, dict):
                 out.append(rec)
@@ -168,7 +177,7 @@ def run_over(run_dir, pid):
             os.kill(pid, 0)  # shortcut: a reused PID keeps the window open; close it by hand then
         except ProcessLookupError:
             return True
-        except PermissionError:
+        except (PermissionError, OverflowError):  # OverflowError: pid too large for the OS
             pass
     return False
 
@@ -225,7 +234,10 @@ class Worker:
             return False
         if self._reader is None or self._reader.path != self.log:
             self._reader = LogReader(self.log)
-        new = [line for rec in self._reader.read_new() for line in format_record(rec)]
+        records = self._reader.read_new()
+        if self._reader.truncated:
+            self.lines.clear()
+        new = [line for rec in records for line in format_record(rec)]
         self.lines.extend(new)
         return bool(new)
 
@@ -490,6 +502,9 @@ def main(argv):
         return 2
     if not sys.stdout.isatty():
         print("swarm-dash.py needs a terminal", file=sys.stderr)
+        return 2
+    if not os.path.isdir(run_dir):
+        print(f"swarm-dash.py: {run_dir}: not a folder", file=sys.stderr)
         return 2
     os.environ.setdefault("ESCDELAY", "25")  # before curses starts, so Esc does not lag a second
     try:

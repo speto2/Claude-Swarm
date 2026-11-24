@@ -24,7 +24,16 @@ class AgentsTest(unittest.TestCase):
             self.assertEqual(tools, [line], name)
 
     def test_same_body(self):
-        self.assertEqual(split("swarm-worker.md")[1], split("swarm-worker-web.md")[1])
+        a, b = split("swarm-worker.md")[1], split("swarm-worker-web.md")[1]
+        self.assertTrue(a.strip())
+        self.assertEqual(a, b)
+
+    def test_frontmatter_keys_and_name(self):
+        for name in ("swarm-worker", "swarm-worker-web"):
+            front, _ = split(name + ".md")
+            keys = [l.split(":", 1)[0] for l in front]
+            self.assertEqual(keys, ["name", "description", "tools", "model"], name)
+            self.assertEqual(front[0], "name: " + name)
 
 
 if __name__ == "__main__":

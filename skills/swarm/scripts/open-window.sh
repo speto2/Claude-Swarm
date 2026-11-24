@@ -17,7 +17,7 @@ fallback() {
   exit 3
 }
 
-[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || fallback "$@"
+[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || fallback "$@" # Close when command in $@ exits 
 
 for term in xfce4-terminal x-terminal-emulator gnome-terminal konsole kitty xterm; do
   command -v "$term" >/dev/null 2>&1 || continue
