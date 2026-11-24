@@ -37,7 +37,7 @@ class OpenWindowTest(unittest.TestCase):
             time.sleep(0.05)
         time.sleep(0.1)  # let the stub finish writing
         self.assertEqual(log.read_text().splitlines(),
-                         ["--title", "w1 log", "-x", "python3", target, "arg"])
+                         ["--maximize", "--title", "w1 log", "-x", "python3", target, "arg"])
 
     def test_no_display_prints_command(self):
         env = {"PATH": "/usr/bin:/bin"}
@@ -74,7 +74,23 @@ class OpenWindowTest(unittest.TestCase):
         r = self.run_stubbed(["w1 log", "python3", "x y.py", "arg"])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(log.read_text().splitlines(),
-                         ["-T", "w1 log", "-e", "python3", "x y.py", "arg"])
+                         ["-maximized", "-T", "w1 log", "-e", "python3", "x y.py", "arg"])
+
+    def test_maximize_flags(self):
+        cases = {
+            "gnome-terminal": ["--maximize", "--title", "w1 log", "--"],
+            "kitty": ["--start-as=maximized", "--title", "w1 log"],
+        }
+        for name, flags in cases.items():
+            with self.subTest(name):
+                log = self.tmp / f"{name}.log"
+                self.stub(name, f'printf \'%s\\n\' "$@" > "{log}"\n')
+                r = self.run_stubbed(["w1 log", "python3", "x y.py", "arg"])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(log.read_text().splitlines(), [*flags, "python3", "x y.py", "arg"])
+                (self.bin / name).unlink()
+                for tool in ("bash", "setsid", "sleep"):
+                    (self.bin / tool).unlink()
 
     def test_all_terminals_failing_prints_command(self):
         self.stub("xfce4-terminal", "exit 1\n")
