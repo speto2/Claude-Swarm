@@ -2,7 +2,8 @@
 """Run-folder helper for /swarm: start a run, show what changed, count what it cost.
 
 usage:
-  swarm-run.py init < table.md          check the task table, create the run folder and snapshot, print the run folder
+  swarm-run.py init [--keep] < table.md check the task table, create the run folder and snapshot, print the run folder
+                                        (last line); first removes dead runs: no report.md, idle 24 h, not kept
   swarm-run.py diff <run> [<task-id>]   changes in one task's files (all tasks' without an id) since the snapshot; with an id it
                                         also records that task's file hashes in <run>/reviewed.json and flags changes in other tasks' files
   swarm-run.py cost <run>               tokens and estimated cost per agent, as a markdown table
@@ -28,6 +29,8 @@ CELL_SPLIT = re.compile(r"(?<!\\)\|")
 CLEAN = "clean"
 MAX_READ = 8 * 1024 * 1024  # a regular file over this is hashed, never loaded
 LARGE = object()  # read_bytes result for such a file
+RUN_NAME = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
+SWEEP_AFTER = 24 * 3600  # a run with no report and nothing written for this long is dead
 SWARM_COMMAND = "<command-name>/swarm</command-name>"
 SWARM_START = re.compile(r"\s*(?:<command-message>[^<]*</command-message>\s*)?" + re.escape(SWARM_COMMAND))  # the command opens the message; quoted text does not count
 # List prices per million tokens: (input, output, cache-read multiplier), from Anthropic's pricing table as cached 2026-11-03.
@@ -213,13 +216,55 @@ def snapshot_file(src, dst):
         shutil.copyfileobj(f, out)
 
 
-def cmd_init(text):
+def newest_mtime(path):
+    """Newest lstat mtime of the folder and everything under it, without following symlinks."""
+    newest = os.lstat(path).st_mtime
+    for d, dirs, files in os.walk(path):
+        for name in dirs + files:
+            newest = max(newest, os.lstat(os.path.join(d, name)).st_mtime)
+    return newest
+
+
+def is_kept(run):
+    """snapshot.json's keep flag; None when snapshot.json is missing or unreadable."""
+    try:
+        with open(os.path.join(run, "snapshot.json"), encoding="utf-8") as f:
+            return json.load(f).get("keep") is True
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def sweep_dead_runs(runs_dir, now):
+    """Delete runs that died without a report: no report.md, not kept, nothing written for SWEEP_AFTER."""
+    try:
+        names = sorted(os.listdir(runs_dir))
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        print(f"warning: could not sweep {runs_dir}: {e}", file=sys.stderr)
+        return
+    for name in names:
+        run = os.path.join(runs_dir, name)
+        if not RUN_NAME.match(name) or os.path.islink(run) or not os.path.isdir(run):
+            continue
+        if os.path.exists(os.path.join(run, "report.md")) or is_kept(run):
+            continue
+        try:
+            if now - newest_mtime(run) > SWEEP_AFTER:
+                shutil.rmtree(run)
+                print(f"swept dead run {name}")
+        except OSError as e:
+            print(f"warning: could not sweep {name}: {e}", file=sys.stderr)
+
+
+def cmd_init(text, keep=False):
     root, is_git = project_root()
     owned, owners, problems = read_tasks(text, root)
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
     swarm = os.path.join(root, ".swarm")
+    sweep_dead_runs(os.path.join(swarm, "runs"), time.time())
     os.makedirs(swarm, exist_ok=True)
     ignore = os.path.join(swarm, ".gitignore")
     if not os.path.exists(ignore):
@@ -244,7 +289,7 @@ def cmd_init(text):
         if dirty is None:
             print("warning: git status failed; changes outside the tasks' files will not be checked", file=sys.stderr)
         with open(os.path.join(run, "snapshot.json"), "w") as f:
-            json.dump({"root": root, "git": is_git, "owned": owned, "owners": owners, "dirty": dirty,
+            json.dump({"root": root, "git": is_git, "owned": owned, "owners": owners, "dirty": dirty, "keep": keep,
                        "started_at": datetime.now(timezone.utc).isoformat()}, f, indent=1)
     except OSError as e:
         shutil.rmtree(run, ignore_errors=True)  # no half-made run folder without a snapshot.json
@@ -534,10 +579,10 @@ def main(argv):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")  # a non-UTF-8 file name must not crash the report
-    if argv[:1] == ["init"] and len(argv) == 1:
+    if argv in (["init"], ["init", "--keep"]):
         if hasattr(sys.stdin, "reconfigure"):
             sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-        return cmd_init(sys.stdin.read())
+        return cmd_init(sys.stdin.read(), keep=len(argv) == 2)
     if argv[:1] == ["diff"] and len(argv) in (2, 3):
         return cmd_diff(*argv[1:])
     if argv[:1] == ["cost"] and len(argv) == 2:

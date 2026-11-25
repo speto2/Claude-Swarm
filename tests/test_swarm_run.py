@@ -8,6 +8,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -22,6 +23,7 @@ TABLE = """| id | title | owner | status | files | check | depends | fixes |
 | t2 | docs | w2-docs | pending | docs/a b.md | manual read | none | 0 |
 | h1 | hub lines | main | pending | hub.py | - | t1 | 0 |
 """
+SMALL = "| id | files |\n| t1 | src/api.py |\n"  # no-git table
 
 
 def git(cwd, *args):
@@ -600,6 +602,84 @@ class CliSmokeTest(TempDirTest):
         self.assertTrue(run.is_dir(), r.stdout)
         self.assertEqual((run / "tasks.md").read_text(), TABLE)
         self.assertEqual(run.parent.parent, self.root.resolve() / ".swarm")
+
+
+class CleanupTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        (self.root / "src" / "api.py").write_text("v1\n")
+        os.chdir(self.root)
+
+    def make_run(self, name, report=False, keep=None, age_h=0, snapshot=True):
+        run = self.root / ".swarm" / "runs" / name
+        (run / "workers").mkdir(parents=True)
+        if snapshot:
+            (run / "snapshot.json").write_text(json.dumps({} if keep is None else {"keep": keep}))
+        if report:
+            (run / "report.md").write_text("report\n")
+        t = time.time() - age_h * 3600
+        for d, dirs, files in os.walk(run, topdown=False):
+            for f in files:
+                os.utime(os.path.join(d, f), (t, t))
+            os.utime(d, (t, t))
+        return run
+
+    def test_init_keep_writes_flag(self):
+        code, out, err = run_main(["init", "--keep"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertIs(json.loads((pathlib.Path(out.strip()) / "snapshot.json").read_text())["keep"], True)
+
+    def test_init_default_keep_false(self):
+        code, out, _ = run_main(["init"], SMALL)
+        self.assertIs(json.loads((pathlib.Path(out.strip()) / "snapshot.json").read_text())["keep"], False)
+
+    def test_sweep_removes_stale_reportless_run(self):
+        dead = self.make_run("20261101-000000", age_h=25)
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(dead.exists())
+        self.assertIn("swept dead run 20261101-000000\n", out)
+        self.assertTrue(pathlib.Path(out.strip().splitlines()[-1]).is_dir())  # run path stays the last line
+
+    def test_sweep_keeps_what_it_must(self):
+        keep = [self.make_run("20261101-000001", age_h=1),  # fresh, maybe live
+                self.make_run("20261101-000002", report=True, age_h=99),  # finished (kept by --keep or failed clean)
+                self.make_run("20261101-000003", keep=True, age_h=99),  # keep-marked, crashed
+                self.make_run("not-a-run", age_h=99)]  # foreign name
+        link = self.root / ".swarm" / "runs" / "20261101-000004"
+        link.symlink_to(self.base)  # symlink with a run name
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        for p in keep + [link]:
+            self.assertTrue(os.path.lexists(p), p)
+        self.assertNotIn("swept", out)
+
+    def test_sweep_sees_fresh_nested_file(self):
+        run = self.make_run("20261101-000005", age_h=99)
+        (run / "workers" / "w1.md").write_text("working\n")  # mtime = now, top level stays old
+        os.utime(run, (time.time() - 99 * 3600,) * 2)
+        os.utime(run / "workers", (time.time() - 99 * 3600,) * 2)
+        run_main(["init"], SMALL)
+        self.assertTrue(run.exists())
+
+    def test_sweep_unreadable_snapshot_still_dead(self):
+        run = self.make_run("20261101-000006", age_h=99, snapshot=False)
+        run_main(["init"], SMALL)
+        self.assertFalse(run.exists())
+
+    def test_sweep_first_run_no_runs_dir(self):
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warning", err)
+        self.assertNotIn("swept", out)
+
+    def test_sweep_rmtree_failure_warns_and_init_succeeds(self):
+        self.make_run("20261101-000007", age_h=99)
+        with mock.patch.object(sr.shutil, "rmtree", side_effect=PermissionError("denied")):
+            code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: could not sweep 20261101-000007", err)
+        self.assertTrue(pathlib.Path(out.strip().splitlines()[-1]).is_dir())
 
 
 if __name__ == "__main__":
