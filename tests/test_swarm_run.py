@@ -8,6 +8,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -22,6 +23,7 @@ TABLE = """| id | title | owner | status | files | check | depends | fixes |
 | t2 | docs | w2-docs | pending | docs/a b.md | manual read | none | 0 |
 | h1 | hub lines | main | pending | hub.py | - | t1 | 0 |
 """
+SMALL = "| id | files |\n| t1 | src/api.py |\n"  # no-git table
 
 
 def git(cwd, *args):
@@ -600,6 +602,246 @@ class CliSmokeTest(TempDirTest):
         self.assertTrue(run.is_dir(), r.stdout)
         self.assertEqual((run / "tasks.md").read_text(), TABLE)
         self.assertEqual(run.parent.parent, self.root.resolve() / ".swarm")
+
+
+class CleanupTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        (self.root / "src" / "api.py").write_text("v1\n")
+        os.chdir(self.root)
+        owner = mock.patch.object(sr, "find_owner", return_value=None)  # this session's owner; real one depends on the host
+        owner.start()
+        self.addCleanup(owner.stop)
+
+    def make_run(self, name, report=False, keep=None, age_h=0, snapshot=True, owner=None, statuses=("done",)):
+        run = self.root / ".swarm" / "runs" / name
+        (run / "workers").mkdir(parents=True)
+        if snapshot:
+            snap = {} if keep is None else {"keep": keep}
+            if owner is not None:
+                snap["owner"] = owner
+            (run / "snapshot.json").write_text(json.dumps(snap))
+        if statuses is not None:
+            rows = "".join(f"| t{i} | {st} |\n" for i, st in enumerate(statuses))
+            (run / "tasks.md").write_text("| id | status |\n|---|---|\n" + rows)
+        if report:
+            (run / "report.md").write_text("report\n")
+        t = time.time() - age_h * 3600
+        for d, dirs, files in os.walk(run, topdown=False):
+            for f in files:
+                os.utime(os.path.join(d, f), (t, t))
+            os.utime(d, (t, t))
+        return run
+
+    def test_init_keep_writes_flag(self):
+        code, out, err = run_main(["init", "--keep"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertIs(json.loads((pathlib.Path(out.strip()) / "snapshot.json").read_text())["keep"], True)
+
+    def test_init_default_keep_false(self):
+        code, out, _ = run_main(["init"], SMALL)
+        self.assertIs(json.loads((pathlib.Path(out.strip()) / "snapshot.json").read_text())["keep"], False)
+
+    def test_sweep_removes_stale_reportless_run(self):
+        dead = self.make_run("20261101-000000", age_h=25)
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(dead.exists())
+        self.assertIn("swept dead run 20261101-000000\n", out)
+        self.assertTrue(pathlib.Path(out.strip().splitlines()[-1]).is_dir())  # run path stays the last line
+
+    def test_sweep_keeps_what_it_must(self):
+        keep = [self.make_run("20261101-000001", age_h=1),  # fresh, maybe live
+                self.make_run("20261101-000002", report=True, age_h=99),  # finished (kept by --keep or failed clean)
+                self.make_run("20261101-000003", keep=True, age_h=99),  # keep-marked, crashed
+                self.make_run("not-a-run", age_h=99)]  # foreign name
+        link = self.root / ".swarm" / "runs" / "20261101-000004"
+        link.symlink_to(self.base)  # symlink with a run name
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        for p in keep + [link]:
+            self.assertTrue(os.path.lexists(p), p)
+        self.assertNotIn("swept", out)
+
+    def test_sweep_sees_fresh_nested_file(self):
+        run = self.make_run("20261101-000005", age_h=99)
+        (run / "workers" / "w1.md").write_text("working\n")  # mtime = now, top level stays old
+        os.utime(run, (time.time() - 99 * 3600,) * 2)
+        os.utime(run / "workers", (time.time() - 99 * 3600,) * 2)
+        run_main(["init"], SMALL)
+        self.assertTrue(run.exists())
+
+    def test_sweep_unreadable_snapshot_still_dead(self):
+        run = self.make_run("20261101-000006", age_h=99, snapshot=False)
+        run_main(["init"], SMALL)
+        self.assertFalse(run.exists())
+
+    def test_sweep_first_run_no_runs_dir(self):
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warning", err)
+        self.assertNotIn("swept", out)
+
+    def test_sweep_rmtree_failure_warns_and_init_succeeds(self):
+        self.make_run("20261101-000007", age_h=99)
+        with mock.patch.object(sr.shutil, "rmtree", side_effect=PermissionError("denied")):
+            code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertIn("warning: could not sweep 20261101-000007", err)
+        self.assertTrue(pathlib.Path(out.strip().splitlines()[-1]).is_dir())
+
+    def test_clean_deletes_finished_run(self):
+        run = self.make_run("20261102-000000", report=True, keep=False)
+        self.assertEqual(run_main(["clean", str(run)])[0], 0)
+        self.assertFalse(run.exists())
+
+    def test_clean_relative_path_trailing_slash(self):
+        run = self.make_run("20261102-000001", report=True)
+        os.chdir(self.root / ".swarm")
+        self.assertEqual(run_main(["clean", "runs/20261102-000001/"])[0], 0)
+        self.assertFalse(run.exists())
+
+    def test_clean_keeps_kept_run(self):
+        run = self.make_run("20261102-000002", report=True, keep=True)
+        code, out, _ = run_main(["clean", str(run)])
+        self.assertEqual((code, out), (0, f"kept {run}\n"))
+        self.assertTrue(run.exists())
+
+    def test_clean_refusals(self):
+        no_report = self.make_run("20261102-000003")
+        bad_snap = self.make_run("20261102-000004", report=True, snapshot=False)
+        outside = self.base / "20261102-000005"
+        outside.mkdir()
+        (outside / "report.md").write_text("r")
+        (outside / "snapshot.json").write_text("{}")
+        foreign = self.make_run("notes", report=True)
+        link = self.root / ".swarm" / "runs" / "20261102-000006"
+        link.symlink_to(no_report)
+        for p in (no_report, bad_snap, outside, foreign, link, self.root / ".swarm" / "runs" / "20261102-999999"):
+            code, _, err = run_main(["clean", str(p)])
+            self.assertEqual(code, 1, p)
+            self.assertTrue(err, p)
+        for p in (no_report, bad_snap, outside, foreign, link):
+            self.assertTrue(os.path.lexists(p), p)
+
+    def test_clean_rmtree_failure_exits_1(self):
+        run = self.make_run("20261102-000007", report=True)
+        with mock.patch.object(sr.shutil, "rmtree", side_effect=PermissionError("denied")):
+            code, _, err = run_main(["clean", str(run)])
+        self.assertEqual(code, 1)
+        self.assertIn("denied", err)
+
+
+    def test_clean_refuses_symlink_to_finished_run(self):
+        target = self.make_run("20261102-000008", report=True)
+        link = self.root / ".swarm" / "runs" / "20261102-000009"
+        link.symlink_to(target)
+        for arg in (str(link), str(link) + "/"):
+            code, _, err = run_main(["clean", arg])
+            self.assertEqual(code, 1, arg)
+            self.assertIn("not a run folder", err)
+        self.assertTrue(os.path.islink(link))
+        self.assertTrue((target / "report.md").exists())
+
+    def test_sweep_skips_symlink_to_stale_run(self):
+        target = self.base / "20261101-000008"
+        (target / "workers").mkdir(parents=True)
+        t = time.time() - 99 * 3600
+        for p in (target / "workers", target):
+            os.utime(p, (t, t))
+        (self.root / ".swarm" / "runs").mkdir(parents=True)
+        link = self.root / ".swarm" / "runs" / "20261101-000009"
+        link.symlink_to(target)
+        os.utime(link, (t, t), follow_symlinks=False)  # a fresh link would be skipped as live anyway
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("could not sweep", err)
+        self.assertNotIn("swept", out)
+        self.assertTrue(os.path.islink(link))
+        self.assertTrue(target.is_dir())
+
+
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", ""])
+        p.wait()
+        return p.pid
+
+    def test_init_records_owner(self):
+        with mock.patch.object(sr, "find_owner", return_value=4242):
+            code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads((pathlib.Path(out.strip()) / "snapshot.json").read_text())["owner"], 4242)
+
+    def test_sweep_skips_run_of_other_live_session(self):
+        run = self.make_run("20261103-000000", age_h=99, owner=os.getpid())  # paused for days, its session still open
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(run.exists())
+        self.assertNotIn("swept", out)
+
+    def test_sweep_removes_run_whose_session_ended(self):
+        run = self.make_run("20261103-000001", age_h=99, owner=self.dead_pid())
+        run_main(["init"], SMALL)
+        self.assertFalse(run.exists())
+
+    def test_sweep_removes_stale_run_of_this_session(self):
+        run = self.make_run("20261103-000002", age_h=99, owner=os.getpid())
+        with mock.patch.object(sr, "find_owner", return_value=os.getpid()):
+            run_main(["init"], SMALL)
+        self.assertFalse(run.exists())
+
+    def test_sweep_ignores_bad_owner_values(self):
+        runs = [self.make_run(f"20261103-00001{i}", age_h=99, owner=v) for i, v in enumerate((True, -1, "123", 2 ** 70))]
+        code, _, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        for r in runs:
+            self.assertFalse(r.exists(), r)
+
+    def test_clean_keeps_run_with_unfinished_tasks(self):
+        for i, st in enumerate(("stopped", "working", "pending", "fixing", "`Stopped`")):
+            run = self.make_run(f"20261104-00000{i}", report=True, statuses=("done", st))
+            code, out, err = run_main(["clean", str(run)])
+            self.assertEqual(code, 0, err)
+            self.assertTrue(out.startswith(f"kept {run} ("), out)
+            self.assertTrue(run.exists(), st)
+
+    def test_clean_keeps_run_without_task_table(self):
+        for i, text in enumerate((None, "no table here\n", "| id | title |\n|---|---|\n| t1 | x |\n")):
+            run = self.make_run(f"20261104-00001{i}", report=True, statuses=None)
+            if text is not None:
+                (run / "tasks.md").write_text(text)
+            code, out, err = run_main(["clean", str(run)])
+            self.assertEqual(code, 0, err)
+            self.assertTrue(out.startswith(f"kept {run} ("), out)
+            self.assertTrue(run.exists())
+
+    def test_clean_deletes_run_with_done_and_failed_tasks(self):
+        run = self.make_run("20261104-000020", report=True, statuses=("done", "failed", "`done`"))
+        code, out, err = run_main(["clean", str(run)])
+        self.assertEqual((code, out), (0, ""), err)
+        self.assertFalse(run.exists())
+
+
+class FindOwnerTest(unittest.TestCase):
+    def owner(self, table, ppid=100):
+        def fake_ps(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0 if int(cmd[-1]) in table else 1, table.get(int(cmd[-1]), ""), "")
+        with mock.patch.object(sr.os, "getppid", return_value=ppid), mock.patch.object(sr.subprocess, "run", side_effect=fake_ps):
+            return sr.find_owner()
+
+    def test_finds_nearest_claude_ancestor(self):
+        self.assertEqual(self.owner({100: "   50 bash\n", 50: "   40 claude\n", 40: "    1 claude\n"}), 50)
+
+    def test_parent_itself_can_be_owner(self):
+        self.assertEqual(self.owner({100: "    1 /usr/local/bin/node\n"}), 100)
+
+    def test_none_without_claude_ancestor(self):
+        self.assertIsNone(self.owner({100: "   50 bash\n", 50: "    1 systemd\n"}))
+
+    def test_none_when_ps_fails_or_is_missing(self):
+        self.assertIsNone(self.owner({}))  # ps exits 1 with no output
+        with mock.patch.object(sr.subprocess, "run", side_effect=FileNotFoundError("ps")):
+            self.assertIsNone(sr.find_owner())
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 ---
 name: swarm
-description: "Run a reviewed swarm of parallel worker subagents on a task. Usage: /swarm [<workers>[w] <model> <effort>] <task...>"
-argument-hint: "[<workers>[w] <model> <effort>] <task...>"
+description: "Run a reviewed swarm of parallel worker subagents on a task. Usage: /swarm [--keep] [<workers>[w] <model> <effort>] <task...>"
+argument-hint: "[--keep] [<workers>[w] <model> <effort>] <task...>"
 disable-model-invocation: true
 ---
 
@@ -15,6 +15,7 @@ Arguments: `$ARGUMENTS`
 
 ## 1. Validate
 
+- First word exactly `--keep`: keep this run's folder after the report (sections 5 and 10). Drop the word and apply the rules below to the rest. `--keep` anywhere else is part of the task.
 - First word all digits, optionally followed by `w` (`4` or `4w`, which opens the dashboard; `2fa` or `3rd-party` is not a count): the full form `<workers>[w] <model> <effort> <task...>`, with the values in the usage text below.
 - First word exactly `w`: the defaults, with the dashboard; the task follows.
 - Any other first word: the whole line is the task, with the defaults: one worker per task (at most 20), sonnet, medium, no dashboard.
@@ -22,7 +23,8 @@ Arguments: `$ARGUMENTS`
 If the first word is a count outside 1-20, the rest doesn't fit the full form, or the task is empty, print exactly this and do nothing else:
 
 ```
-Usage: /swarm [<workers>[w] <model> <effort>] <task...>
+Usage: /swarm [--keep] [<workers>[w] <model> <effort>] <task...>
+  --keep   keep the run folder (.swarm/runs/...) after the report; by default it is deleted
   workers  1-20; add w (as in 4w) to open a live dashboard window
   model    haiku | sonnet | opus | fable
   effort   low | medium | high | xhigh | max
@@ -30,6 +32,7 @@ Without them: one worker per task, sonnet, medium. Start with w for the dashboar
 A task that starts with a number needs the full form.
 Examples: /swarm add CSV export to the reports page, with tests
           /swarm 4w sonnet medium add CSV export to the reports page, with tests
+          /swarm --keep w add CSV export to the reports page, with tests
 ```
 
 If valid, run one harmless Bash call (`pwd`), because the permission-mode note can arrive with a tool result. Then:
@@ -67,7 +70,7 @@ If valid, run one harmless Bash call (`pwd`), because the permission-mode note c
 
 Show the plan, then end your turn:
 
-- workers, model, effort, dashboard on or off
+- workers, model, effort, dashboard on or off, run folder kept (`--keep`) or deleted after the report
 - per task: id, title, worker, tier, files, check, depends; hub files with their pinned lines
 - if this conversation already holds other work, one line: a fresh session would make the run cheaper, since every overseer step re-reads this context
 
@@ -75,7 +78,7 @@ Spawn nothing until the user says go. On changes, adjust and preview again. On s
 
 ## 5. Run folder and snapshot
 
-From the project root, pipe the task table to the helper. It checks the table, creates `.swarm/runs/<timestamp>/` with `tasks.md` and `workers/`, snapshots the owned files and git state, and prints the absolute run folder, `<run>`:
+From the project root, pipe the task table to the helper. It checks the table, creates `.swarm/runs/<timestamp>/` with `tasks.md` and `workers/`, snapshots the owned files and git state, and prints the absolute run folder, `<run>`, as its last line. With `--keep`, run `init --keep`. Before creating the folder it removes dead runs (no `report.md`, not kept, nothing written for 24 hours, and started by a Claude Code session that has ended or by this one) and prints `swept dead run <name>` for each:
 
 ```bash
 B="<base>/scripts"
@@ -168,9 +171,11 @@ Run `python3 "$B/swarm-run.py" cost <run>`; if it exits non-zero, go on without 
 - **Unverified or left**
 - **Cost**: the helper's table and notes, unchanged (or the no-cost-data note)
 
+Then run `python3 "$B/swarm-run.py" clean <run>`. It deletes the run folder, or prints `kept <run>` when the run was started with `--keep` or a task is not `done` or `failed`. Only for a kept run, end the chat report with the run folder's path. If it exits non-zero, add one chat line saying the run folder was left at `<run>`.
+
 ## Stopping
 
-If the user says stop: TaskStop every running worker, mark open tasks `stopped`, and report what finished, with the cost table (or, if `swarm-run.py cost` failed, a one-line note saying so), in chat and in `<run>/report.md`.
+If the user says stop: TaskStop every running worker, mark open tasks `stopped`, and report what finished, with the cost table (or, if `swarm-run.py cost` failed, a one-line note saying so), in chat and in `<run>/report.md`. Do not run `clean`: `<run>/snapshot/` holds the owned files as they were before the run, so the user can restore them. End with the run folder's path and say it stays until they delete it.
 
 ## Keep it cheap
 
