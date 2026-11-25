@@ -609,12 +609,21 @@ class CleanupTest(TempDirTest):
         super().setUp()
         (self.root / "src" / "api.py").write_text("v1\n")
         os.chdir(self.root)
+        owner = mock.patch.object(sr, "find_owner", return_value=None)  # this session's owner; real one depends on the host
+        owner.start()
+        self.addCleanup(owner.stop)
 
-    def make_run(self, name, report=False, keep=None, age_h=0, snapshot=True):
+    def make_run(self, name, report=False, keep=None, age_h=0, snapshot=True, owner=None, statuses=("done",)):
         run = self.root / ".swarm" / "runs" / name
         (run / "workers").mkdir(parents=True)
         if snapshot:
-            (run / "snapshot.json").write_text(json.dumps({} if keep is None else {"keep": keep}))
+            snap = {} if keep is None else {"keep": keep}
+            if owner is not None:
+                snap["owner"] = owner
+            (run / "snapshot.json").write_text(json.dumps(snap))
+        if statuses is not None:
+            rows = "".join(f"| t{i} | {st} |\n" for i, st in enumerate(statuses))
+            (run / "tasks.md").write_text("| id | status |\n|---|---|\n" + rows)
         if report:
             (run / "report.md").write_text("report\n")
         t = time.time() - age_h * 3600
@@ -750,6 +759,89 @@ class CleanupTest(TempDirTest):
         self.assertNotIn("swept", out)
         self.assertTrue(os.path.islink(link))
         self.assertTrue(target.is_dir())
+
+
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", ""])
+        p.wait()
+        return p.pid
+
+    def test_init_records_owner(self):
+        with mock.patch.object(sr, "find_owner", return_value=4242):
+            code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads((pathlib.Path(out.strip()) / "snapshot.json").read_text())["owner"], 4242)
+
+    def test_sweep_skips_run_of_other_live_session(self):
+        run = self.make_run("20261103-000000", age_h=99, owner=os.getpid())  # paused for days, its session still open
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(run.exists())
+        self.assertNotIn("swept", out)
+
+    def test_sweep_removes_run_whose_session_ended(self):
+        run = self.make_run("20261103-000001", age_h=99, owner=self.dead_pid())
+        run_main(["init"], SMALL)
+        self.assertFalse(run.exists())
+
+    def test_sweep_removes_stale_run_of_this_session(self):
+        run = self.make_run("20261103-000002", age_h=99, owner=os.getpid())
+        with mock.patch.object(sr, "find_owner", return_value=os.getpid()):
+            run_main(["init"], SMALL)
+        self.assertFalse(run.exists())
+
+    def test_sweep_ignores_bad_owner_values(self):
+        runs = [self.make_run(f"20261103-00001{i}", age_h=99, owner=v) for i, v in enumerate((True, -1, "123", 2 ** 70))]
+        code, _, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        for r in runs:
+            self.assertFalse(r.exists(), r)
+
+    def test_clean_keeps_run_with_unfinished_tasks(self):
+        for i, st in enumerate(("stopped", "working", "pending", "fixing", "`Stopped`")):
+            run = self.make_run(f"20261104-00000{i}", report=True, statuses=("done", st))
+            code, out, err = run_main(["clean", str(run)])
+            self.assertEqual(code, 0, err)
+            self.assertTrue(out.startswith(f"kept {run} ("), out)
+            self.assertTrue(run.exists(), st)
+
+    def test_clean_keeps_run_without_task_table(self):
+        for i, text in enumerate((None, "no table here\n", "| id | title |\n|---|---|\n| t1 | x |\n")):
+            run = self.make_run(f"20261104-00001{i}", report=True, statuses=None)
+            if text is not None:
+                (run / "tasks.md").write_text(text)
+            code, out, err = run_main(["clean", str(run)])
+            self.assertEqual(code, 0, err)
+            self.assertTrue(out.startswith(f"kept {run} ("), out)
+            self.assertTrue(run.exists())
+
+    def test_clean_deletes_run_with_done_and_failed_tasks(self):
+        run = self.make_run("20261104-000020", report=True, statuses=("done", "failed", "`done`"))
+        code, out, err = run_main(["clean", str(run)])
+        self.assertEqual((code, out), (0, ""), err)
+        self.assertFalse(run.exists())
+
+
+class FindOwnerTest(unittest.TestCase):
+    def owner(self, table, ppid=100):
+        def fake_ps(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0 if int(cmd[-1]) in table else 1, table.get(int(cmd[-1]), ""), "")
+        with mock.patch.object(sr.os, "getppid", return_value=ppid), mock.patch.object(sr.subprocess, "run", side_effect=fake_ps):
+            return sr.find_owner()
+
+    def test_finds_nearest_claude_ancestor(self):
+        self.assertEqual(self.owner({100: "   50 bash\n", 50: "   40 claude\n", 40: "    1 claude\n"}), 50)
+
+    def test_parent_itself_can_be_owner(self):
+        self.assertEqual(self.owner({100: "    1 /usr/local/bin/node\n"}), 100)
+
+    def test_none_without_claude_ancestor(self):
+        self.assertIsNone(self.owner({100: "   50 bash\n", 50: "    1 systemd\n"}))
+
+    def test_none_when_ps_fails_or_is_missing(self):
+        self.assertIsNone(self.owner({}))  # ps exits 1 with no output
+        with mock.patch.object(sr.subprocess, "run", side_effect=FileNotFoundError("ps")):
+            self.assertIsNone(sr.find_owner())
 
 
 if __name__ == "__main__":

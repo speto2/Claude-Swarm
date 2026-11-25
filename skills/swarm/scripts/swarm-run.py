@@ -3,11 +3,13 @@
 
 usage:
   swarm-run.py init [--keep] < table.md check the task table, create the run folder and snapshot, print the run folder
-                                        (last line); first removes dead runs: no report.md, idle 24 h, not kept
+                                        (last line); first removes dead runs: no report.md, not kept, idle 24 h, and
+                                        started by a Claude Code session that has ended or by this one
   swarm-run.py diff <run> [<task-id>]   changes in one task's files (all tasks' without an id) since the snapshot; with an id it
                                         also records that task's file hashes in <run>/reviewed.json and flags changes in other tasks' files
   swarm-run.py cost <run>               tokens and estimated cost per agent, as a markdown table
-  swarm-run.py clean <run>              delete a finished run folder unless it was started with --keep
+  swarm-run.py clean <run>              delete a finished run folder unless it was started with --keep or a task
+                                        is not done or failed (a stopped run keeps snapshot/ for restoring)
 
 Paths in the task table are relative to the project root: the git top level, else the current folder.
 """
@@ -226,6 +228,46 @@ def newest_mtime(path):
     return newest
 
 
+def find_owner():
+    """PID of the nearest claude or node ancestor, the Claude Code process running this helper; None if not found."""
+    pid = os.getppid()
+    for _ in range(8):
+        if pid <= 1:
+            return None
+        try:
+            r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True)
+            ppid, comm = r.stdout.split(None, 1)
+            ppid = int(ppid)
+        except (OSError, ValueError):
+            return None
+        if os.path.basename(comm.strip()) in ("claude", "node"):
+            return pid
+        pid = ppid
+    return None
+
+
+def owner_alive(pid):
+    """True while the process with this PID exists; False for a gone PID or a value that is not a PID."""
+    if type(pid) is not int or pid <= 0:  # type(): JSON true is a bool, which is an int
+        return False
+    try:
+        os.kill(pid, 0)  # shortcut: a reused PID keeps a dead run until that process exits; never deletes
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def task_statuses(run):
+    """{task id: status} from <run>/tasks.md; {} when it has no table with id and status columns."""
+    header, rows = parse_table(read_text(os.path.join(run, "tasks.md")))
+    if "id" not in header or "status" not in header:
+        return {}
+    i, j = header.index("id"), header.index("status")
+    return {r[i]: r[j].strip("` ").lower() for r in rows if len(r) == len(header)}
+
+
 def is_kept(run):
     """snapshot.json's keep flag; None when snapshot.json is missing or unreadable."""
     try:
@@ -235,8 +277,9 @@ def is_kept(run):
         return None
 
 
-def sweep_dead_runs(runs_dir, now):
-    """Delete runs that died without a report: no report.md, not kept, nothing written for SWEEP_AFTER."""
+def sweep_dead_runs(runs_dir, now, owner=None):
+    """Delete runs that died without a report: no report.md, not kept, nothing written for SWEEP_AFTER, and
+    started by a session (owner PID) that has ended or is this one, so a run paused in another open session stays."""
     try:
         names = sorted(os.listdir(runs_dir))
     except FileNotFoundError:
@@ -249,6 +292,10 @@ def sweep_dead_runs(runs_dir, now):
         if not RUN_NAME.match(name) or os.path.islink(run) or not os.path.isdir(run):
             continue
         if os.path.exists(os.path.join(run, "report.md")) or is_kept(run):
+            continue
+        snap = load_json(os.path.join(run, "snapshot.json"))
+        run_owner = snap.get("owner") if isinstance(snap, dict) else None
+        if run_owner != owner and owner_alive(run_owner):
             continue
         try:
             if now - newest_mtime(run) > SWEEP_AFTER:
@@ -265,7 +312,8 @@ def cmd_init(text, keep=False):
         print("\n".join(problems), file=sys.stderr)
         return 1
     swarm = os.path.join(root, ".swarm")
-    sweep_dead_runs(os.path.join(swarm, "runs"), time.time())
+    owner = find_owner()
+    sweep_dead_runs(os.path.join(swarm, "runs"), time.time(), owner)
     os.makedirs(swarm, exist_ok=True)
     ignore = os.path.join(swarm, ".gitignore")
     if not os.path.exists(ignore):
@@ -290,7 +338,7 @@ def cmd_init(text, keep=False):
         if dirty is None:
             print("warning: git status failed; changes outside the tasks' files will not be checked", file=sys.stderr)
         with open(os.path.join(run, "snapshot.json"), "w") as f:
-            json.dump({"root": root, "git": is_git, "owned": owned, "owners": owners, "dirty": dirty, "keep": keep,
+            json.dump({"root": root, "git": is_git, "owned": owned, "owners": owners, "dirty": dirty, "keep": keep, "owner": owner,
                        "started_at": datetime.now(timezone.utc).isoformat()}, f, indent=1)
     except OSError as e:
         shutil.rmtree(run, ignore_errors=True)  # no half-made run folder without a snapshot.json
@@ -387,10 +435,7 @@ def cmd_diff(run, task=None):
         reviewed_path = os.path.join(run, "reviewed.json")
         reviewed = load_json(reviewed_path)
         reviewed = reviewed if isinstance(reviewed, dict) else {}
-        header, rows = parse_table(read_text(os.path.join(run, "tasks.md")))
-        status = {}
-        if "id" in header and "status" in header:
-            status = {r[header.index("id")]: r[header.index("status")].strip("` ").lower() for r in rows if len(r) == len(header)}
+        status = task_statuses(run)
         others = []
         for t, ps in owned.items():
             if t == task or owners.get(t) == "main":
@@ -594,6 +639,12 @@ def cmd_clean(run):
         elif kept:
             print(f"kept {run}")
             return 0
+        else:
+            statuses = task_statuses(real)
+            open_ = sorted(set(statuses.values()) - {"done", "failed"})
+            if not statuses or open_:  # a stop leaves tasks open; their pre-run files live only in snapshot/
+                print(f"kept {run} ({'tasks ' + ', '.join(open_) if open_ else 'no task table'})")
+                return 0
     if problem:
         print(f"clean refused: {run}: {problem}", file=sys.stderr)
         return 1
