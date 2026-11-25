@@ -7,6 +7,7 @@ usage:
   swarm-run.py diff <run> [<task-id>]   changes in one task's files (all tasks' without an id) since the snapshot; with an id it
                                         also records that task's file hashes in <run>/reviewed.json and flags changes in other tasks' files
   swarm-run.py cost <run>               tokens and estimated cost per agent, as a markdown table
+  swarm-run.py clean <run>              delete a finished run folder unless it was started with --keep
 
 Paths in the task table are relative to the project root: the git top level, else the current folder.
 """
@@ -575,6 +576,35 @@ def cmd_cost(run):
     return 0
 
 
+def cmd_clean(run):
+    """Delete a finished run folder (has report.md) inside .swarm/runs/, unless snapshot.json says keep."""
+    real = os.path.realpath(run)
+    problem = None
+    if os.path.islink(os.path.normpath(run)) or not os.path.isdir(real):
+        problem = "not a run folder"
+    elif (not RUN_NAME.match(os.path.basename(real)) or os.path.basename(os.path.dirname(real)) != "runs"
+          or os.path.basename(os.path.dirname(os.path.dirname(real))) != ".swarm"):
+        problem = "not inside .swarm/runs/"
+    elif not os.path.exists(os.path.join(real, "report.md")):
+        problem = "no report.md yet"
+    else:
+        kept = is_kept(real)
+        if kept is None:
+            problem = "snapshot.json missing or unreadable"
+        elif kept:
+            print(f"kept {run}")
+            return 0
+    if problem:
+        print(f"clean refused: {run}: {problem}", file=sys.stderr)
+        return 1
+    try:
+        shutil.rmtree(real)
+    except OSError as e:
+        print(f"clean failed: {run}: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -587,6 +617,8 @@ def main(argv):
         return cmd_diff(*argv[1:])
     if argv[:1] == ["cost"] and len(argv) == 2:
         return cmd_cost(argv[1])
+    if argv[:1] == ["clean"] and len(argv) == 2:
+        return cmd_clean(argv[1])
     print(__doc__.split("\n\n")[1], file=sys.stderr)
     return 2
 

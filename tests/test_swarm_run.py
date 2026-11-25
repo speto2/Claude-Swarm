@@ -681,6 +681,47 @@ class CleanupTest(TempDirTest):
         self.assertIn("warning: could not sweep 20261101-000007", err)
         self.assertTrue(pathlib.Path(out.strip().splitlines()[-1]).is_dir())
 
+    def test_clean_deletes_finished_run(self):
+        run = self.make_run("20261102-000000", report=True, keep=False)
+        self.assertEqual(run_main(["clean", str(run)])[0], 0)
+        self.assertFalse(run.exists())
+
+    def test_clean_relative_path_trailing_slash(self):
+        run = self.make_run("20261102-000001", report=True)
+        os.chdir(self.root / ".swarm")
+        self.assertEqual(run_main(["clean", "runs/20261102-000001/"])[0], 0)
+        self.assertFalse(run.exists())
+
+    def test_clean_keeps_kept_run(self):
+        run = self.make_run("20261102-000002", report=True, keep=True)
+        code, out, _ = run_main(["clean", str(run)])
+        self.assertEqual((code, out), (0, f"kept {run}\n"))
+        self.assertTrue(run.exists())
+
+    def test_clean_refusals(self):
+        no_report = self.make_run("20261102-000003")
+        bad_snap = self.make_run("20261102-000004", report=True, snapshot=False)
+        outside = self.base / "20261102-000005"
+        outside.mkdir()
+        (outside / "report.md").write_text("r")
+        (outside / "snapshot.json").write_text("{}")
+        foreign = self.make_run("notes", report=True)
+        link = self.root / ".swarm" / "runs" / "20261102-000006"
+        link.symlink_to(no_report)
+        for p in (no_report, bad_snap, outside, foreign, link, self.root / ".swarm" / "runs" / "20261102-999999"):
+            code, _, err = run_main(["clean", str(p)])
+            self.assertEqual(code, 1, p)
+            self.assertTrue(err, p)
+        for p in (no_report, bad_snap, outside, foreign, link):
+            self.assertTrue(os.path.lexists(p), p)
+
+    def test_clean_rmtree_failure_exits_1(self):
+        run = self.make_run("20261102-000007", report=True)
+        with mock.patch.object(sr.shutil, "rmtree", side_effect=PermissionError("denied")):
+            code, _, err = run_main(["clean", str(run)])
+        self.assertEqual(code, 1)
+        self.assertIn("denied", err)
+
 
 if __name__ == "__main__":
     unittest.main()
