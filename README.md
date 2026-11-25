@@ -66,7 +66,8 @@ The overseer is usually the biggest cost: every step it takes re-reads your whol
 ## Usage
 
 ```
-Usage: /swarm [<workers>[w] <model> <effort>] <task...>
+Usage: /swarm [--keep] [<workers>[w] <model> <effort>] <task...>
+  --keep   keep the run folder (.swarm/runs/...) after the report; by default it is deleted
   workers  1-20; add w (as in 4w) to open a live dashboard window
   model    haiku | sonnet | opus | fable
   effort   low | medium | high | xhigh | max
@@ -74,11 +75,13 @@ Without them: one worker per task, sonnet, medium. Start with w for the dashboar
 A task that starts with a number needs the full form.
 Examples: /swarm add CSV export to the reports page, with tests
           /swarm 4w sonnet medium add CSV export to the reports page, with tests
+          /swarm --keep w add CSV export to the reports page, with tests
 ```
 
 - `/swarm <task>`: the defaults, no dashboard.
 - `/swarm w <task>`: the defaults, with the dashboard.
 - `/swarm 4 opus high <task>`: at most 4 workers on opus at high effort; `4w` adds the dashboard.
+- `/swarm --keep <task>`: keep the run folder afterwards. `--keep` goes first, before any other option.
 
 The overseer then shows its plan. Reply go to start, describe changes to adjust it, or say stop.
 
@@ -109,7 +112,7 @@ Each run writes to `.swarm/runs/<YYYYMMDD-HHMMSS>/` at the project root. `.swarm
 
 The cost table reads Claude Code's own session logs and prices them at Anthropic's list prices as of 2026-11-03 (in `swarm-run.py`). It is an estimate: it doesn't know your plan or discounts, and prices change.
 
-Runs are kept as history. Delete `.swarm/` when you no longer need them.
+After the report, the run folder is deleted; the report stays in the chat. Start with `--keep` to keep it. The next `/swarm` in the same project also deletes runs that ended without a report (a crash or a closed session) once nothing in them has changed for 24 hours. Kept runs stay until you delete them.
 
 ## Uninstall
 
