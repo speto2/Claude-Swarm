@@ -723,5 +723,34 @@ class CleanupTest(TempDirTest):
         self.assertIn("denied", err)
 
 
+    def test_clean_refuses_symlink_to_finished_run(self):
+        target = self.make_run("20261102-000008", report=True)
+        link = self.root / ".swarm" / "runs" / "20261102-000009"
+        link.symlink_to(target)
+        for arg in (str(link), str(link) + "/"):
+            code, _, err = run_main(["clean", arg])
+            self.assertEqual(code, 1, arg)
+            self.assertIn("not a run folder", err)
+        self.assertTrue(os.path.islink(link))
+        self.assertTrue((target / "report.md").exists())
+
+    def test_sweep_skips_symlink_to_stale_run(self):
+        target = self.base / "20261101-000008"
+        (target / "workers").mkdir(parents=True)
+        t = time.time() - 99 * 3600
+        for p in (target / "workers", target):
+            os.utime(p, (t, t))
+        (self.root / ".swarm" / "runs").mkdir(parents=True)
+        link = self.root / ".swarm" / "runs" / "20261101-000009"
+        link.symlink_to(target)
+        os.utime(link, (t, t), follow_symlinks=False)  # a fresh link would be skipped as live anyway
+        code, out, err = run_main(["init"], SMALL)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("could not sweep", err)
+        self.assertNotIn("swept", out)
+        self.assertTrue(os.path.islink(link))
+        self.assertTrue(target.is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()
