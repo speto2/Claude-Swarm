@@ -70,7 +70,7 @@ If valid, run one harmless Bash call (`pwd`), because the permission-mode note c
 
 Show the plan, then end your turn:
 
-- workers, model, effort, dashboard on or off
+- workers, model, effort, dashboard on or off, run folder kept (`--keep`) or deleted after the report
 - per task: id, title, worker, tier, files, check, depends; hub files with their pinned lines
 - if this conversation already holds other work, one line: a fresh session would make the run cheaper, since every overseer step re-reads this context
 
@@ -171,11 +171,11 @@ Run `python3 "$B/swarm-run.py" cost <run>`; if it exits non-zero, go on without 
 - **Unverified or left**
 - **Cost**: the helper's table and notes, unchanged (or the no-cost-data note)
 
-Then run `python3 "$B/swarm-run.py" clean <run>`. It deletes the run folder, or prints `kept <run>` for a `--keep` run; then end the chat report with the run folder's path. If it exits non-zero, add one chat line saying the run folder was left at `<run>`.
+Then run `python3 "$B/swarm-run.py" clean <run>`. It deletes the run folder, or prints `kept <run>` for a `--keep` run. Only for a kept run, end the chat report with the run folder's path. If it exits non-zero, add one chat line saying the run folder was left at `<run>`.
 
 ## Stopping
 
-If the user says stop: TaskStop every running worker, mark open tasks `stopped`, and report what finished, with the cost table (or, if `swarm-run.py cost` failed, a one-line note saying so), in chat and in `<run>/report.md`. Then run `clean` as in section 10.
+If the user says stop: TaskStop every running worker, mark open tasks `stopped`, and report what finished, with the cost table (or, if `swarm-run.py cost` failed, a one-line note saying so), in chat and in `<run>/report.md`. Do not run `clean`: `<run>/snapshot/` holds the owned files as they were before the run, so the user can restore them. End with the run folder's path and say it stays until they delete it.
 
 ## Keep it cheap
 
