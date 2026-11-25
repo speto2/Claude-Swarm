@@ -112,9 +112,9 @@ Each run writes to `.swarm/runs/<YYYYMMDD-HHMMSS>/` at the project root. `.swarm
 
 The cost table reads Claude Code's own session logs and prices them at Anthropic's list prices as of 2026-11-03 (in `swarm-run.py`). It is an estimate: it doesn't know your plan or discounts, and prices change.
 
-After the report, the run folder is deleted; the report stays in the chat. Start with `--keep` to keep it. The next `/swarm` in the same project also deletes runs that ended without a report (a crash or a closed session) once nothing in them has changed for 24 hours.
+After the report, the run folder is deleted; the report stays in the chat. Start with `--keep` to keep it. The next `/swarm` in the same project also deletes runs that ended without a report (a crash or a closed session) once nothing in them has changed for 24 hours and the Claude Code session that started them has ended. A run paused in another open session is left alone.
 
-These stay until you delete them: kept runs, stopped runs (their `snapshot/` holds the owned files as they were before the run, so you can restore them), runs where the delete failed, and runs from before this version.
+These stay until you delete them: kept runs, stopped runs and any run with a task that is not done or failed (their `snapshot/` holds the owned files as they were before the run, so you can restore them), runs where the delete failed, and finished runs from before this version. Runs from before this version that never finished are deleted like any other dead run.
 
 ## Uninstall
 

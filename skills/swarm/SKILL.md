@@ -78,7 +78,7 @@ Spawn nothing until the user says go. On changes, adjust and preview again. On s
 
 ## 5. Run folder and snapshot
 
-From the project root, pipe the task table to the helper. It checks the table, creates `.swarm/runs/<timestamp>/` with `tasks.md` and `workers/`, snapshots the owned files and git state, and prints the absolute run folder, `<run>`, as its last line. With `--keep`, run `init --keep`. Before creating the folder it removes dead runs (no `report.md`, nothing written for 24 hours, not kept) and prints `swept dead run <name>` for each:
+From the project root, pipe the task table to the helper. It checks the table, creates `.swarm/runs/<timestamp>/` with `tasks.md` and `workers/`, snapshots the owned files and git state, and prints the absolute run folder, `<run>`, as its last line. With `--keep`, run `init --keep`. Before creating the folder it removes dead runs (no `report.md`, not kept, nothing written for 24 hours, and started by a Claude Code session that has ended or by this one) and prints `swept dead run <name>` for each:
 
 ```bash
 B="<base>/scripts"
@@ -171,7 +171,7 @@ Run `python3 "$B/swarm-run.py" cost <run>`; if it exits non-zero, go on without 
 - **Unverified or left**
 - **Cost**: the helper's table and notes, unchanged (or the no-cost-data note)
 
-Then run `python3 "$B/swarm-run.py" clean <run>`. It deletes the run folder, or prints `kept <run>` for a `--keep` run. Only for a kept run, end the chat report with the run folder's path. If it exits non-zero, add one chat line saying the run folder was left at `<run>`.
+Then run `python3 "$B/swarm-run.py" clean <run>`. It deletes the run folder, or prints `kept <run>` when the run was started with `--keep` or a task is not `done` or `failed`. Only for a kept run, end the chat report with the run folder's path. If it exits non-zero, add one chat line saying the run folder was left at `<run>`.
 
 ## Stopping
 
