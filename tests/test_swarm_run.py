@@ -844,5 +844,33 @@ class FindOwnerTest(unittest.TestCase):
             self.assertIsNone(sr.find_owner())
 
 
+class HelperTest(TempDirTest):
+    def test_find_run_start_picks_last_start_before_snapshot(self):
+        t = lambda n: sr.parse_ts(f"2026-01-01T00:00:0{n}+00:00")
+        starts = [(0, t(1)), (5, t(3)), (9, t(5))]
+        self.assertEqual(sr.find_run_start(starts, {"started_at": "2026-01-01T00:00:04+00:00"}), 1)
+        self.assertEqual(sr.find_run_start(starts, {}), 2)  # no snapshot time: the latest
+        self.assertEqual(sr.find_run_start([], None), -1)
+
+    def test_cost_table_totals_and_flags_unpriced(self):
+        t = lambda usd, unpriced: {"requests": 1, "input": 2, "write": 3, "read": 4, "output": 5, "usd": usd, "models": {"m|x"}, "unpriced": unpriced}
+        lines, total = sr.cost_table([("a", t(1.0, False)), ("b", t(0.5, True))])
+        self.assertEqual(total["usd"], 1.5)
+        self.assertEqual(total["requests"], 2)
+        self.assertTrue(lines[-1].startswith("| total |  | 2 |") and lines[-1].endswith("$1.50+? |"))
+        self.assertIn("m\\|x", lines[2])
+
+    def test_read_snapshot_rejects_missing_and_escaping_paths(self):
+        run = os.path.join(str(self.base), "run")
+        os.makedirs(run)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(sr.read_snapshot(run))
+            with open(os.path.join(run, "snapshot.json"), "w") as f:
+                json.dump({"root": str(self.base), "owned": {"t1": ["../x"]}}, f)
+            self.assertIsNone(sr.read_snapshot(run))
+        self.assertIn("no valid snapshot.json", err.getvalue())
+        self.assertIn("contains ..", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

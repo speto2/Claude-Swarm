@@ -113,11 +113,11 @@ class LogReader:
     def read_new(self):
         self.truncated = False
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)  # roster paths are untrusted: a FIFO would block open() forever
-            with os.fdopen(fd, "rb") as f:
+            f = open_regular_or_none(self.path, follow=True)  # output files are symlinks to the real log
+            if f is None:  # FIFO or device: never a worker log
+                return []
+            with f:
                 st = os.fstat(f.fileno())
-                if not stat.S_ISREG(st.st_mode):  # FIFO or device: never a worker log
-                    return []
                 ident = (st.st_dev, st.st_ino)
                 if self.ident is not None and (ident != self.ident or st.st_size < self.pos):  # replaced or truncated: start over
                     self.pos, self.buf, self.tail, self.truncated = 0, b"", b"", True
@@ -146,18 +146,36 @@ class LogReader:
         return out
 
 
-def read_small(path, limit):
-    """(first `limit` bytes, mtime) of a regular file opened without following a symlink or blocking; None for anything else.
+def open_regular_or_none(path, mode="rb", follow=False, **kw):
+    """File object of a regular file, opened without blocking, and without following a symlink unless `follow`;
+    None for a symlink or anything not regular. Unlike swarm-run.py's open_regular, which returns an fd and raises.
     Raises OSError if it cannot be opened (a roster path is untrusted: a symlink could leak a secret, a FIFO would block open())."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW))
     except OSError as e:
         if e.errno in (errno.ELOOP, errno.EMLINK):
             return None
         raise
-    with os.fdopen(fd, "rb") as f:
-        st = os.fstat(f.fileno())
-        return (f.read(limit), st.st_mtime) if stat.S_ISREG(st.st_mode) else None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        return os.fdopen(fd, mode, **kw)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:  # some fdopen failures close the fd themselves
+            pass
+        raise
+
+
+def read_small(path, limit):
+    """(first `limit` bytes, mtime) of a regular file via open_regular_or_none; None for anything else. Raises OSError like it."""
+    f = open_regular_or_none(path)
+    if f is None:
+        return None
+    with f:
+        return f.read(limit), os.fstat(f.fileno()).st_mtime
 
 
 def worker_status(path):
@@ -231,7 +249,10 @@ def parse_table(text):
 def _table(run_dir, name, columns):
     """(rows as dicts of `columns` (missing column -> ""), header names); ([], []) if the file is missing."""
     try:
-        with open(os.path.join(run_dir, name), errors="replace") as f:
+        f = open_regular_or_none(os.path.join(run_dir, name), "r", errors="replace")
+        if f is None:  # symlink or not a regular file: treated like a missing file
+            return [], []
+        with f:
             header, rows = parse_table(f.read())
     except OSError:
         return [], []
