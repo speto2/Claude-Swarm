@@ -486,6 +486,16 @@ class PriceTest(unittest.TestCase):
         t = sr.tally([rec("assistant", "t", mid=None, model="claude-opus-5-5", usage=usage(1, 0, 0, 1))] * 3)
         self.assertEqual((t["requests"], t["input"], t["output"]), (3, 3, 3))  # no id: each record counts
 
+    def test_tally_prices_long_haiku_prompts_higher(self):
+        # Haiku 5.5: prompts over 100,000 tokens (input + cache write + cache read) cost $0.50 / $2.50 instead of $0.10 / $0.50
+        cost = lambda u: sr.tally([rec("assistant", "t", mid="m", model="claude-haiku-5-5", usage=u)])["usd"]
+        self.assertAlmostEqual(cost(usage(100_000, 0, 0, 1_000_000)), 0.01 + 0.50)  # exactly 100,000: the lower price
+        self.assertAlmostEqual(cost(usage(1, 0, 100_000, 1_000_000)), 0.0000005 + 0.005 + 2.50)  # 100,001: higher, cache read at 0.1x of $0.50
+        self.assertAlmostEqual(cost(usage(0, 100_001, 0, 0)), 100_001 * 0.50 * 1.25 / 1e6)
+        self.assertAlmostEqual(cost(usage(0, 100_001, 0, 0, w1h=100_001)), 100_001 * 0.50 * 2.0 / 1e6)
+        # other models have no threshold
+        self.assertAlmostEqual(sr.tally([rec("assistant", "t", mid="m", model="claude-sonnet-5-5", usage=usage(500_000, 0, 0, 0))])["usd"], 1.0)
+
     def test_tally_survives_malformed_usage(self):
         bad = rec("assistant", "t", mid="m", model="claude-opus-5-5",
                   usage={"input_tokens": "x", "output_tokens": [1], "cache_creation_input_tokens": 5, "cache_creation": 7, "cache_read_input_tokens": None})
