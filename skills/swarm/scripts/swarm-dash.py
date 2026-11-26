@@ -113,7 +113,7 @@ class LogReader:
     def read_new(self):
         self.truncated = False
         try:
-            f = open_regular(self.path, follow=True)  # output files are symlinks to the real log
+            f = open_regular_or_none(self.path, follow=True)  # output files are symlinks to the real log
             if f is None:  # FIFO or device: never a worker log
                 return []
             with f:
@@ -146,8 +146,9 @@ class LogReader:
         return out
 
 
-def open_regular(path, mode="rb", follow=False, **kw):
-    """Open a regular file without blocking, and without following a symlink unless `follow`; None for a symlink or anything not regular.
+def open_regular_or_none(path, mode="rb", follow=False, **kw):
+    """File object of a regular file, opened without blocking, and without following a symlink unless `follow`;
+    None for a symlink or anything not regular. Unlike swarm-run.py's open_regular, which returns an fd and raises.
     Raises OSError if it cannot be opened (a roster path is untrusted: a symlink could leak a secret, a FIFO would block open())."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW))
@@ -155,15 +156,22 @@ def open_regular(path, mode="rb", follow=False, **kw):
         if e.errno in (errno.ELOOP, errno.EMLINK):
             return None
         raise
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        return None
-    return os.fdopen(fd, mode, **kw)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        return os.fdopen(fd, mode, **kw)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:  # some fdopen failures close the fd themselves
+            pass
+        raise
 
 
 def read_small(path, limit):
-    """(first `limit` bytes, mtime) of a regular file via open_regular; None for anything else. Raises OSError like it."""
-    f = open_regular(path)
+    """(first `limit` bytes, mtime) of a regular file via open_regular_or_none; None for anything else. Raises OSError like it."""
+    f = open_regular_or_none(path)
     if f is None:
         return None
     with f:
@@ -241,7 +249,7 @@ def parse_table(text):
 def _table(run_dir, name, columns):
     """(rows as dicts of `columns` (missing column -> ""), header names); ([], []) if the file is missing."""
     try:
-        f = open_regular(os.path.join(run_dir, name), "r", errors="replace")
+        f = open_regular_or_none(os.path.join(run_dir, name), "r", errors="replace")
         if f is None:  # symlink or not a regular file: treated like a missing file
             return [], []
         with f:

@@ -237,6 +237,21 @@ class ReaderTest(RunDirTest):
             self.assertEqual(sd.LogReader(str(fifo)).read_new(), [])
             self.assertEqual(sd.LogReader("/dev/zero").read_new(), [])
 
+    def test_open_regular_or_none_closes_fd_it_does_not_return(self):
+        fds, real_open = [], os.open
+        def spy(*a, **kw):
+            fds.append(real_open(*a, **kw))
+            return fds[-1]
+        self.append("x\n")
+        with mock.patch.object(sd.os, "open", spy):
+            self.assertIsNone(sd.open_regular_or_none(str(self.dir)))  # a directory: not regular
+            with self.assertRaises(ValueError):
+                sd.open_regular_or_none(str(self.path), "bogus")  # fdopen fails and leaves the fd open
+        self.assertEqual(len(fds), 2)
+        for fd in fds:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
     def test_reader_follows_symlink_to_log(self):  # Claude Code output files are symlinks to the real log
         self.append('{"type":"user"}\n')
         os.symlink(self.path, self.dir / "x.output")
