@@ -37,12 +37,13 @@ SWEEP_AFTER = 24 * 3600  # a run with no report and nothing written for this lon
 SWARM_COMMAND = "<command-name>/swarm</command-name>"
 SWARM_START = re.compile(r"\s*(?:<command-message>[^<]*</command-message>\s*)?" + re.escape(SWARM_COMMAND))  # the command opens the message; quoted text does not count
 # List prices per million tokens: (input, output, cache-read multiplier), from Anthropic's pricing table as cached 2026-11-03.
-# shortcut: Haiku 5.5 costs more above 100K-token prompts and its read multiplier is the general ~0.1x; update this table when prices change
+# An optional tail (threshold, input, output) prices a request whose prompt (input + cache write + cache read) is over threshold.
+# Update this table when prices change.
 PRICES = {
     "claude-fable-5-2": (8.0, 40.0, 0.025),
     "claude-opus-5-5": (4.0, 20.0, 0.05),
     "claude-sonnet-5-5": (2.0, 10.0, 0.05),
-    "claude-haiku-5-5": (0.10, 0.50, 0.10),
+    "claude-haiku-5-5": (0.10, 0.50, 0.10, 100_000, 0.50, 2.50),
 }
 WRITE_5M, WRITE_1H = 1.25, 2.0
 
@@ -563,7 +564,9 @@ def tally(recs):
         t["models"].add(model)
         price = lookup_price(model)
         if price:
-            pin, pout, rmul = price
+            pin, pout, rmul, *long = price
+            if long and n["input"] + n["write"] + n["read"] > long[0]:
+                pin, pout = long[1], long[2]
             t["usd"] += (n["input"] + (n["write"] - w1h) * WRITE_5M + w1h * WRITE_1H + n["read"] * rmul) * pin / 1e6 + n["output"] * pout / 1e6
         else:
             t["unpriced"] = True
