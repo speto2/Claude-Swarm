@@ -84,6 +84,14 @@ class SkillTest(unittest.TestCase):
             self.assertIn(s, text)
         self.assertIn(HEADER, self.body)  # section 5's init example uses the same header
 
+    def test_planner_safeguards(self):
+        text = read(SKILL_DIR / "planner.md")
+        self.assertIn("`WAITING`", text)  # a subagent that ends its turn has handed back
+        self.assertIn("Read-only", text)  # planner edits would land before the snapshot, unreviewed
+        plan = self.body.split("## 2. Plan", 1)[1].split("## 3.", 1)[0]
+        for s in ("`WAITING`", "`continue`", "header row", "its `owner`", "beyond its task's files", "overrides"):
+            self.assertIn(s, plan)
+
     def test_usage_block_matches_readme(self):
         def usage(text):
             m = re.search(r"^Usage: /swarm.*?\n(?=```)", text, re.M | re.S)
