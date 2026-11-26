@@ -89,8 +89,11 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`WAITING`", text)  # a subagent that ends its turn has handed back
         self.assertIn("Read-only", text)  # planner edits would land before the snapshot, unreviewed
         plan = self.body.split("## 2. Plan", 1)[1].split("## 3.", 1)[0]
-        for s in ("`WAITING`", "`continue`", "header row", "its `owner`", "beyond its task's files", "overrides"):
+        for s in ("`WAITING`", "`continue`", "header row", "its `owner`", "beyond its task's files", "overrides",
+                  "git top level", "every WORKERS tier"):
             self.assertIn(s, plan)
+        preview = self.body.split("## 4. Preview", 1)[1].split("## 5.", 1)[0]
+        self.assertIn("`--keep` yourself", preview)  # the planner can't act on run settings
 
     def test_usage_block_matches_readme(self):
         def usage(text):
