@@ -5,6 +5,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 AGENTS = ROOT / "agents"
 SKILL_DIR = ROOT / "skills" / "swarm"
+HEADER = "| id | title | owner | status | files | check | depends | fixes |"
 MODELS = {"haiku", "sonnet", "opus", "fable", "inherit"}
 
 
@@ -70,10 +71,17 @@ class SkillTest(unittest.TestCase):
             self.assertTrue((SKILL_DIR / "scripts" / n).is_file(), n)
 
     def test_agent_tiers_exist(self):
-        tiers = set(re.findall(r"`(swarm-worker[\w-]*)`", self.body))
+        # the planner prompt holds the tier list, the body names the tiers it spawns
+        tiers = set(re.findall(r"`(swarm-worker[\w-]*)`", self.body + read(SKILL_DIR / "planner.md")))
         self.assertTrue({"swarm-worker", "swarm-worker-web"} <= tiers, tiers)
         for t in tiers:
             self.assertTrue((AGENTS / (t + ".md")).is_file(), t)
+
+    def test_planner_brief(self):
+        text = read(SKILL_DIR / "planner.md")
+        for s in ("TASKS", "WORKERS", "HUB", "NOTES", HEADER):
+            self.assertIn(s, text)
+        self.assertIn(HEADER, self.body)  # section 5's init example uses the same header
 
     def test_usage_block_matches_readme(self):
         def usage(text):
