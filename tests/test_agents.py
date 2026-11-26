@@ -78,6 +78,7 @@ class SkillTest(unittest.TestCase):
             self.assertTrue((AGENTS / (t + ".md")).is_file(), t)
 
     def test_planner_brief(self):
+        self.assertIn("<base>/planner.md", self.body)
         text = read(SKILL_DIR / "planner.md")
         for s in ("TASKS", "WORKERS", "HUB", "NOTES", HEADER):
             self.assertIn(s, text)
