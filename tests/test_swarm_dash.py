@@ -361,6 +361,14 @@ class ReaderTest(RunDirTest):
         self.assertEqual(sd.read_tasks(str(self.run)),
                          [{"id": "t1", "title": "a | b", "owner": "w1-api", "status": "working", "fixes": "1"}])
 
+    def test_tables_refuse_symlink_and_fifo(self):
+        (self.run / "secret.md").write_text("| id | title |\n|---|---|\n| t1 | x |\n")
+        os.symlink(self.run / "secret.md", self.run / "tasks.md")
+        os.mkfifo(self.run / "roster.md")
+        with alarm(3, "tables"):
+            self.assertEqual(sd.read_tasks(str(self.run)), [])
+            self.assertEqual(sd.read_roster(str(self.run)), [])
+
     def test_read_tasks_missing_file_and_columns(self):
         self.assertEqual(sd.read_tasks(str(self.run)), [])
         (self.run / "tasks.md").write_text("| id | title |\n|---|---|\n| t1 | a |\n")
