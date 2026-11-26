@@ -6,7 +6,7 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 
 `/swarm <task>` makes your Claude Code session the overseer:
 
-1. It splits the task into pieces, each with its own files, so no two workers edit the same file. Files that several pieces only add lines to, such as a route table, stay with the overseer, which adds the lines at the end.
+1. A planner agent explores the code and splits the task into pieces, each with its own files, so no two workers edit the same file. Files that several pieces only add lines to, such as a route table, stay with the overseer, which adds the lines at the end.
 2. It shows you the plan (pieces, files, checks, workers) and waits for your go before starting anything.
 3. It runs the workers at the same time: one per piece by default, on sonnet at medium effort, or the number, model and effort you choose (see Usage).
 4. Workers share a run folder (task board, per-worker notes) and can message each other and the overseer.
