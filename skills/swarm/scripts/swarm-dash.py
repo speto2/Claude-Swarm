@@ -551,6 +551,9 @@ def run(stdscr, dash):
 
 
 def main(argv):
+    if argv in (["-h"], ["--help"]):  # before the isatty check, so help works when piped
+        print("usage: swarm-dash.py <run-folder> [<owner-pid>]")
+        return 0
     try:
         if len(argv) not in (1, 2):
             raise ValueError

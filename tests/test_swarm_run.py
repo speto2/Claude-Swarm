@@ -307,6 +307,11 @@ class CostTest(CostBase):
         self.assertLess(out.index("| w1-api"), out.index("| other: Explore"))
         self.assertIn("Overseer share: 84%.", out)
 
+    def test_cost_row_shows_sub_cent_cost(self):
+        t = {"requests": 1, "input": 0, "write": 0, "read": 0, "output": 0}
+        for usd, unpriced, cell in ((0.004, False, "<$0.01"), (0.004, True, "<$0.01+?"), (0.0, False, "$0.00"), (0.005, False, "$0.01")):
+            self.assertTrue(sr.cost_row("x", "m", {**t, "usd": usd}, unpriced).endswith(f"| {cell} |"), usd)
+
     def test_cost_without_worker_log(self):
         (self.run_dir / "roster.md").write_text("| worker | agent id | output file |\n| w1 | aaa | /nonexistent |\n")
         code, _, err = run_main(["cost", str(self.run_dir)])
@@ -316,6 +321,12 @@ class CostTest(CostBase):
     def test_usage_errors(self):
         for argv in ([], ["init", "x"], ["diff"], ["cost"], ["bogus"]):
             self.assertEqual(run_main(argv)[0], 2, argv)
+
+    def test_help_flags(self):
+        for argv in (["-h"], ["--help"]):
+            code, out, _ = run_main(argv)
+            self.assertEqual(code, 0, argv)
+            self.assertIn("usage:", out)
 
 
 class ParseTableTest(unittest.TestCase):
