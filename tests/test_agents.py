@@ -192,10 +192,6 @@ class WorkerTypesTest(unittest.TestCase):
         self.assertIn("no `model` or `effort`", final)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReadmeInstallTest(unittest.TestCase):
     def setUp(self):
         self.readme = read(ROOT / "README.md")
@@ -213,3 +209,7 @@ class ReadmeInstallTest(unittest.TestCase):
         sec = self.readme.split("## Worker types", 1)[1].split("\n## ", 1)[0]
         for s in ("`git-preflight`", "`test-runner`", "haiku"):
             self.assertIn(s, sec)
+
+
+if __name__ == "__main__":
+    unittest.main()
