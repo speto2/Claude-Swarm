@@ -11,12 +11,12 @@ You run a project's checks and report only the failures. Follow the steps in ord
 Your brief looks like: `Project root: <root>. Run the full test suite, plus build and lint where they exist.` It may end with `Commands: <cmd>; <cmd>`.
 
 ### Rules
-- Run only the chosen checks: never install anything, never edit files, never run any other command.
+- Run only the chosen checks: never install anything, never edit files. Besides the checks, you may only use `cd`, `mktemp`, `grep`, `tail`, `head` and reading project files.
 - Never invent a command that is not in the brief or the project files.
 - Never print a whole log. The report is at most 40 lines.
 
 ### Steps
-1. `cd` to the project root from the brief.
+1. Note the project root from the brief. Each Bash call starts fresh: shell variables and the working folder are not kept between calls, so every command call starts with `cd <root> &&`.
 2. Choose the commands. If the brief has `Commands:`, use exactly those and say "source: brief". Otherwise take the first source below that has a match, and say which one you used (for example "source: package.json"):
    1. a test command the README names;
    2. `package.json` `scripts.test`, `scripts.build`, `scripts.lint`;
@@ -25,8 +25,8 @@ Your brief looks like: `Project root: <root>. Run the full test suite, plus buil
    5. `tests/` holds `test_*.py`: `python3 -m unittest discover -s tests`.
    - Build and lint: add them only where the same source has them.
    - Nothing found: Result is `NO TESTS FOUND`. Skip steps 3 and 4.
-3. Make one folder with `d=$(mktemp -d)`. Run each command from the project root with its output saved: `<command> > "$d/<n>.log" 2>&1; echo "exit $?"`. Use a different `<n>` for each command.
-4. Read the logs only with `grep` and `tail`, never `cat`. For a failing command, `grep -n -E "FAIL|ERROR|Error|error:|Traceback|assert"` the log, then `tail -n 20` it for the counts line. For each failure note the test name, the decisive error line and the `<file>:<line>`.
+3. Run each command in ONE Bash call, with its own `mktemp -d` folder: `cd <root> && d=$(mktemp -d) && <command> > "$d/1.log" 2>&1; echo "exit $?; log $d/1.log"`. The call prints the exit code and the log path. Use that literal printed path in later calls, never `$d`.
+4. Read the logs only with `grep`, `tail` and `head`, never `cat`. For every log, whatever the exit code, run `tail -n 20 <log>` to find the counts line. For a failing command also run `grep -n -E "FAIL|ERROR|Error|error:|Traceback|assert" <log> | head -n 40`. For each failure note the test name, the decisive error line and the `<file>:<line>`.
 5. Write the report.
 
 ### Report (exactly this structure)
