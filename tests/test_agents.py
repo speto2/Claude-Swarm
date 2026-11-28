@@ -158,5 +158,39 @@ class TestRunnerTest(unittest.TestCase):
             self.assertIn(s, self.body)
 
 
+class WorkerTypesTest(unittest.TestCase):
+    def rows(self):
+        sec = read(SKILL_DIR / "SKILL.md").split("## Worker types", 1)[1].split("\n## ", 1)[0]
+        return [[c.strip().strip("`") for c in l.strip().strip("|").split("|")] for l in sec.splitlines() if l.startswith("| `")]
+
+    def test_table_shape(self):
+        rows = self.rows()
+        self.assertLessEqual({"swarm-worker", "swarm-worker-web", "general-purpose", "git-preflight", "test-runner"}, {r[0] for r in rows})
+        for r in rows:
+            self.assertEqual(len(r), 4, r); self.assertIn(r[1], {"worker", "helper"}, r)
+
+    def test_pinned_rows_match_frontmatter(self):
+        for name, kind, model, effort in self.rows():
+            path = AGENTS / (name + ".md")
+            if name == "general-purpose":
+                continue
+            fm = dict((k.strip(), v.strip()) for k, v in (l.split(":", 1) for l in split(path.name)[0]))
+            if model == "run":
+                self.assertNotIn("effort", fm, name)
+            else:
+                self.assertEqual((fm["model"], fm.get("effort")), (model, effort), name)
+
+    def test_every_agent_file_in_table(self):
+        names = {r[0] for r in self.rows()}
+        for p in AGENTS.glob("*.md"):
+            self.assertIn(p.stem, names)
+
+    def test_helpers_spawned_unpinned_args(self):
+        body = read(SKILL_DIR / "SKILL.md")
+        final = body.split("## 9. Final review", 1)[1].split("## 10.", 1)[0]
+        self.assertIn("`test-runner`", final)
+        self.assertIn("no `model` or `effort`", final)
+
+
 if __name__ == "__main__":
     unittest.main()
