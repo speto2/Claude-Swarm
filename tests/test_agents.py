@@ -106,5 +106,111 @@ class SkillTest(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class PreflightTest(unittest.TestCase):
+    def setUp(self):
+        self.front, self.body = split("git-preflight.md")
+        self.fm = {k.strip(): v.strip() for k, v in (l.split(":", 1) for l in self.front)}
+
+    def test_frontmatter(self):
+        self.assertEqual(set(self.fm), {"name", "description", "tools", "model", "effort"})
+        self.assertEqual((self.fm["name"], self.fm["model"], self.fm["effort"], self.fm["tools"]),
+                         ("git-preflight", "haiku", "medium", "Bash"))
+
+    def test_output_contract(self):
+        for s in ("**Verdict:**", "**Cause:**", "**Evidence:**", "**Healed:**", "**User action:**", "READY", "BLOCKED"):
+            self.assertIn(s, self.body)
+
+    def test_safety_rules(self):
+        for s in ("sudo", "ssh-add", "force-push", "git branch -D", "git reset"):
+            self.assertIn(s, self.body)  # each named in the never-do rules
+
+    def test_upstream_remote(self):
+        self.assertIn("@{u}", self.body)
+        self.assertNotIn("git remote get-url origin", self.body)
+
+    def test_https_and_other_hosts(self):
+        self.assertIn("gh auth status", self.body)
+        self.assertIn("HTTPS auth not checked", self.body)
+        self.assertIn("not GitHub", self.body)
+
+    def test_linked_worktree_no_heal(self):
+        self.assertIn("--git-common-dir", self.body)
+        self.assertIn("linked worktree", self.body)
+        self.assertIn("upstream gone in a linked worktree", self.body)
+
+
+class TestRunnerTest(unittest.TestCase):
+    def setUp(self):
+        self.front, self.body = split("test-runner.md")
+        self.fm = {k.strip(): v.strip() for k, v in (l.split(":", 1) for l in self.front)}
+
+    def test_frontmatter(self):
+        self.assertEqual(set(self.fm), {"name", "description", "tools", "model", "effort"})
+        self.assertEqual((self.fm["name"], self.fm["model"], self.fm["effort"]), ("test-runner", "haiku", "low"))
+        self.assertNotIn("Edit", self.fm["tools"])
+        self.assertNotIn("Write", self.fm["tools"])
+
+    def test_report_format(self):
+        for s in ("**Result:**", "PASS", "FAIL", "NO TESTS FOUND", "**Commands:**", "**Failures:**", "**Counts:**"):
+            self.assertIn(s, self.body)
+
+    def test_no_tests_and_long_output(self):
+        for s in ("never install", "mktemp", "40 lines", "and N more", "File \"", "600000"):
+            self.assertIn(s, self.body)
+
+
+class WorkerTypesTest(unittest.TestCase):
+    def rows(self):
+        sec = read(SKILL_DIR / "SKILL.md").split("## Worker types", 1)[1].split("\n## ", 1)[0]
+        return [[c.strip().strip("`") for c in l.strip().strip("|").split("|")] for l in sec.splitlines() if l.startswith("| `")]
+
+    def test_table_shape(self):
+        rows = self.rows()
+        self.assertLessEqual({"swarm-worker", "swarm-worker-web", "general-purpose", "git-preflight", "test-runner"}, {r[0] for r in rows})
+        for r in rows:
+            self.assertEqual(len(r), 4, r); self.assertIn(r[1], {"worker", "helper"}, r)
+
+    def test_pinned_rows_match_frontmatter(self):
+        for name, kind, model, effort in self.rows():
+            path = AGENTS / (name + ".md")
+            if name == "general-purpose":
+                continue
+            fm = dict((k.strip(), v.strip()) for k, v in (l.split(":", 1) for l in split(path.name)[0]))
+            if model == "run":
+                self.assertNotIn("effort", fm, name)
+            else:
+                self.assertEqual((fm["model"], fm.get("effort")), (model, effort), name)
+
+    def test_every_agent_file_in_table(self):
+        names = {r[0] for r in self.rows()}
+        for p in AGENTS.glob("*.md"):
+            self.assertIn(p.stem, names)
+
+    def test_helpers_spawned_unpinned_args(self):
+        body = read(SKILL_DIR / "SKILL.md")
+        final = body.split("## 9. Final review", 1)[1].split("## 10.", 1)[0]
+        self.assertIn("`test-runner`", final)
+        self.assertIn("no `model` or `effort`", final)
+
+
+class ReadmeInstallTest(unittest.TestCase):
+    def setUp(self):
+        self.readme = read(ROOT / "README.md")
+
+    def test_install_covers_all_agents(self):
+        self.assertIn("agents/*.md", self.readme)
+        self.assertIn("every file in ~/Claude-Swarm/agents", self.readme)
+
+    def test_uninstall_only_own_links(self):
+        sec = self.readme.split("## Uninstall", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("readlink", sec)
+        self.assertIn("agents/*.md", sec)
+
+    def test_worker_types_lists_helpers(self):
+        sec = self.readme.split("## Worker types", 1)[1].split("\n## ", 1)[0]
+        for s in ("`git-preflight`", "`test-runner`", "haiku"):
+            self.assertIn(s, sec)
+
+
 if __name__ == "__main__":
     unittest.main()

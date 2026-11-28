@@ -631,8 +631,9 @@ def tally_workers(session, names, rostered, start_dt, end_dt):
 
 
 def cost_row(label, models, t, unpriced):
+    usd = "<$0.01" if 0 < t["usd"] < 0.005 else f"${t['usd']:.2f}"  # a cheap model's few cents would otherwise show as $0.00
     return (f"| {label} | {models} | {t['requests']:,} | {t['input']:,} | {t['write']:,} | {t['read']:,} | {t['output']:,} | "
-            f"${t['usd']:.2f}{'+?' if unpriced else ''} |")
+            f"{usd}{'+?' if unpriced else ''} |")
 
 
 def cost_table(agents):
@@ -721,6 +722,9 @@ def main(argv):
         return cmd_cost(argv[1])
     if argv[:1] == ["clean"] and len(argv) == 2:
         return cmd_clean(argv[1])
+    if argv in (["-h"], ["--help"]):
+        print(__doc__.split("\n\n")[1])
+        return 0
     print(__doc__.split("\n\n")[1], file=sys.stderr)
     return 2
 

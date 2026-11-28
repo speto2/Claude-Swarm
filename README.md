@@ -26,16 +26,15 @@ A Claude Code skill that runs a reviewed swarm of parallel worker subagents on o
 
 ### With Claude Code
 
-Paste this prompt into Claude Code, from any folder. It clones the repository to `~/Claude-Swarm`, links the skill and the two worker agents, and runs the tests. It never overwrites an existing file or folder.
+Paste this prompt into Claude Code, from any folder. It clones the repository to `~/Claude-Swarm`, links the skill and every agent, and runs the tests. It never overwrites an existing file or folder.
 
 ```text
 Install the /swarm skill from https://github.com/speto2/Claude-Swarm for me. Do these steps in order and stop at the first problem:
 1. If ~/Claude-Swarm already exists, stop and ask me what to do. Otherwise run: git clone https://github.com/speto2/Claude-Swarm.git ~/Claude-Swarm
 2. Check that python3 is installed and that `claude --version` is 2.1.292 or later. On Linux, also say whether one of these terminals is installed for the optional live dashboard: xfce4-terminal, x-terminal-emulator, ptyxis, gnome-terminal, kgx, konsole, mate-terminal, tilix, kitty, alacritty, foot, wezterm, ghostty, xterm. Report anything missing.
-3. Create ~/.claude/skills and ~/.claude/agents if they are missing. Then create these three symbolic links with `ln -s`, using absolute paths. Check each link path first: if it already exists, do not touch it, stop and tell me.
+3. Create ~/.claude/skills and ~/.claude/agents if they are missing. Then create these symbolic links with `ln -s`, using absolute paths. Check each link path first: if it already exists, do not touch it, stop and tell me.
    - ~/.claude/skills/swarm -> ~/Claude-Swarm/skills/swarm
-   - ~/.claude/agents/swarm-worker.md -> ~/Claude-Swarm/agents/swarm-worker.md
-   - ~/.claude/agents/swarm-worker-web.md -> ~/Claude-Swarm/agents/swarm-worker-web.md
+   - for every file in ~/Claude-Swarm/agents, a link ~/.claude/agents/<file name> -> ~/Claude-Swarm/agents/<file name>
 4. In ~/Claude-Swarm, run: python3 -m unittest discover -s tests
 5. Report what you did and the test result. Then tell me to start a new Claude Code session and switch to auto mode before I run /swarm.
 ```
@@ -48,12 +47,12 @@ From the root of this repository:
 
 ```bash
 mkdir -p ~/.claude/skills ~/.claude/agents
-for p in skills/swarm agents/swarm-worker.md agents/swarm-worker-web.md; do
+for p in skills/swarm agents/*.md; do
   if [ -e ~/.claude/"$p" ] || [ -L ~/.claude/"$p" ]; then echo "exists, skipped: ~/.claude/$p"; else ln -s "$PWD/$p" ~/.claude/"$p"; fi
 done
 ```
 
-The loop skips and reports any link path that already exists, a dangling link included, so it never nests a link inside an existing folder or overwrites anything; running it again changes nothing. To reinstall, run the uninstall line first (see Uninstall). The links point into the repository, so keep it where you installed it from.
+The loop skips and reports any link path that already exists, a dangling link included, so it never nests a link inside an existing folder or overwrites anything; running it again changes nothing. If you already have your own `~/.claude/agents/git-preflight.md`, the loop skips it; compare it with `agents/git-preflight.md`, then move yours away and rerun to use the packaged one. To reinstall, run the uninstall loop first (see Uninstall). The links point into the repository, so keep it where you installed it from. To update, pull the new version and rerun the loop: it links any new agents and skips existing links.
 
 Start a new Claude Code session afterwards: agent definitions are loaded when a session starts.
 
@@ -95,6 +94,13 @@ The overseer picks one per task:
 - `swarm-worker-web`: the same plus web fetch and search, for tasks that need online docs.
 - `general-purpose`: only for tasks that need MCP tools or a skill. It loads the full context, so it costs more.
 
+Helpers the overseer runs itself:
+
+- `git-preflight` (haiku, medium): checks git and GitHub auth before a push. When a merged branch's upstream is gone and the tree is clean, it switches to the default branch and deletes the merged branch (in a linked worktree it reports instead of switching).
+- `test-runner` (haiku, low): runs the tests, build and lint for the final review and returns only failures.
+
+Helpers keep their own model even when the run is started with another model.
+
 Worker types are guidance on cost and scope, not a security boundary. In auto mode every worker can run shell commands without approval. The file-ownership and no-commit rules are instructions, not enforced limits. A worker that reads hostile text, such as a file or a fetched page, could be steered. Run `/swarm` only in repositories whose content you trust.
 
 ## Run folder
@@ -118,11 +124,15 @@ These stay until you delete them: kept runs, stopped runs and any run with a tas
 
 ## Uninstall
 
+From the repository root (`~/Claude-Swarm` if you installed with the Claude Code prompt):
+
 ```bash
-rm ~/.claude/skills/swarm ~/.claude/agents/swarm-worker.md ~/.claude/agents/swarm-worker-web.md
+for p in skills/swarm agents/*.md; do
+  [ "$(readlink ~/.claude/"$p")" = "$PWD/$p" ] && rm ~/.claude/"$p"
+done
 ```
 
-If you installed with the Claude Code prompt, you can then delete `~/Claude-Swarm`.
+It removes only links that point into this repository, so your own files stay. If you installed with the Claude Code prompt, you can then delete `~/Claude-Swarm`.
 
 ## Tests
 

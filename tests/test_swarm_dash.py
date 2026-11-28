@@ -936,6 +936,12 @@ class UiTest(RunDirTest):
                 self.assertEqual(sd.main(argv), 2)
             self.assertIn("usage: swarm-dash.py", err.getvalue())
 
+    def test_main_help_flags(self):
+        for argv in (["-h"], ["--help"]):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(sd.main(argv), 0)
+            self.assertEqual(out.getvalue(), "usage: swarm-dash.py <run-folder> [<owner-pid>]\n")
+
     def test_main_missing_run_folder(self):
         with contextlib.redirect_stderr(io.StringIO()) as err, mock.patch("sys.stdout.isatty", create=True, return_value=True):
             self.assertEqual(sd.main([str(self.dir / "nope")]), 2)
