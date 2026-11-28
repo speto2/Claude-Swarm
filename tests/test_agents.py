@@ -194,3 +194,22 @@ class WorkerTypesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadmeInstallTest(unittest.TestCase):
+    def setUp(self):
+        self.readme = read(ROOT / "README.md")
+
+    def test_install_covers_all_agents(self):
+        self.assertIn("agents/*.md", self.readme)
+        self.assertIn("every file in ~/Claude-Swarm/agents", self.readme)
+
+    def test_uninstall_only_own_links(self):
+        sec = self.readme.split("## Uninstall", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("readlink", sec)
+        self.assertIn("agents/*.md", sec)
+
+    def test_worker_types_lists_helpers(self):
+        sec = self.readme.split("## Worker types", 1)[1].split("\n## ", 1)[0]
+        for s in ("`git-preflight`", "`test-runner`", "haiku"):
+            self.assertIn(s, sec)
