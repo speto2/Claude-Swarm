@@ -138,5 +138,25 @@ class PreflightTest(unittest.TestCase):
         self.assertIn("linked worktree", self.body)
 
 
+class TestRunnerTest(unittest.TestCase):
+    def setUp(self):
+        self.front, self.body = split("test-runner.md")
+        self.fm = {k.strip(): v.strip() for k, v in (l.split(":", 1) for l in self.front)}
+
+    def test_frontmatter(self):
+        self.assertEqual(set(self.fm), {"name", "description", "tools", "model", "effort"})
+        self.assertEqual((self.fm["name"], self.fm["model"], self.fm["effort"]), ("test-runner", "haiku", "low"))
+        self.assertNotIn("Edit", self.fm["tools"])
+        self.assertNotIn("Write", self.fm["tools"])
+
+    def test_report_format(self):
+        for s in ("**Result:**", "PASS", "FAIL", "NO TESTS FOUND", "**Commands:**", "**Failures:**", "**Counts:**"):
+            self.assertIn(s, self.body)
+
+    def test_no_tests_and_long_output(self):
+        for s in ("never install", "mktemp", "40 lines", "and N more"):
+            self.assertIn(s, self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
