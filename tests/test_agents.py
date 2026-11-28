@@ -136,6 +136,7 @@ class PreflightTest(unittest.TestCase):
     def test_linked_worktree_no_heal(self):
         self.assertIn("--git-common-dir", self.body)
         self.assertIn("linked worktree", self.body)
+        self.assertIn("upstream gone in a linked worktree", self.body)
 
 
 class TestRunnerTest(unittest.TestCase):
@@ -154,7 +155,7 @@ class TestRunnerTest(unittest.TestCase):
             self.assertIn(s, self.body)
 
     def test_no_tests_and_long_output(self):
-        for s in ("never install", "mktemp", "40 lines", "and N more"):
+        for s in ("never install", "mktemp", "40 lines", "and N more", "File \"", "600000"):
             self.assertIn(s, self.body)
 
 

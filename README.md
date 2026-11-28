@@ -52,7 +52,7 @@ for p in skills/swarm agents/*.md; do
 done
 ```
 
-The loop skips and reports any link path that already exists, a dangling link included, so it never nests a link inside an existing folder or overwrites anything; running it again changes nothing. If you already have your own `~/.claude/agents/git-preflight.md`, the loop skips it; compare it with `agents/git-preflight.md`, then move yours away and rerun to use the packaged one. To reinstall, run the uninstall loop first (see Uninstall). The links point into the repository, so keep it where you installed it from.
+The loop skips and reports any link path that already exists, a dangling link included, so it never nests a link inside an existing folder or overwrites anything; running it again changes nothing. If you already have your own `~/.claude/agents/git-preflight.md`, the loop skips it; compare it with `agents/git-preflight.md`, then move yours away and rerun to use the packaged one. To reinstall, run the uninstall loop first (see Uninstall). The links point into the repository, so keep it where you installed it from. To update, pull the new version and rerun the loop: it links any new agents and skips existing links.
 
 Start a new Claude Code session afterwards: agent definitions are loaded when a session starts.
 
@@ -96,7 +96,7 @@ The overseer picks one per task:
 
 Helpers the overseer runs itself:
 
-- `git-preflight` (haiku, medium): checks git and GitHub auth before a push.
+- `git-preflight` (haiku, medium): checks git and GitHub auth before a push. When a merged branch's upstream is gone and the tree is clean, it switches to the default branch and deletes the merged branch (in a linked worktree it reports instead of switching).
 - `test-runner` (haiku, low): runs the tests, build and lint for the final review and returns only failures.
 
 Helpers keep their own model even when the run is started with another model.

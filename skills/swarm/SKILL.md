@@ -171,7 +171,7 @@ FIX <task-id> (round n/3)
 When every worker task is `done` or `failed`:
 
 - Add the pinned lines of `done` tasks to the hub files and set those rows to `done`. Failed tasks add no lines.
-- Spawn `test-runner` (Agent tool, no `model` or `effort`) with the brief `Project root: <root>. Run the full test suite, plus build and lint where they exist.`, adding `Commands: ...` if you know them, and end your turn; its report wakes you. Read only its report. If it reports `NO TESTS FOUND` and you know the commands, or the agent type is missing, run them yourself as before.
+- Spawn `test-runner` (Agent tool, no `model` or `effort`) with the brief `Project root: <root>. Run the full test suite, plus build and lint where they exist.`, adding `Commands: ...` if you know them, and end your turn; its report wakes you. Read only its report. If it reports `NO TESTS FOUND` and you know the commands, or the agent type is missing, run them yourself. If its report has no `**Result:**` line, run the checks yourself.
 - Read all changes with `python3 "$B/swarm-run.py" diff <run>` for parts that don't fit together, bugs, error handling, code quality and security (input handling, secrets, injection, permissions). Read files marked NOT SHOWN directly.
 - A problem inside one worker's files: a FIX report to that worker. A problem spanning several workers' files: fix it yourself if it is a few lines; otherwise spawn one fixer worker (`swarm-worker` unless it needs web or MCP tools; same model and effort) that owns those files, and add it to `<run>/roster.md`. Its changes are not in the snapshot: read them with `git diff`.
 - Repeat until clean, at most 3 rounds.
