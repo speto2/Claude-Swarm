@@ -106,5 +106,37 @@ class SkillTest(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class PreflightTest(unittest.TestCase):
+    def setUp(self):
+        self.front, self.body = split("git-preflight.md")
+        self.fm = {k.strip(): v.strip() for k, v in (l.split(":", 1) for l in self.front)}
+
+    def test_frontmatter(self):
+        self.assertEqual(set(self.fm), {"name", "description", "tools", "model", "effort"})
+        self.assertEqual((self.fm["name"], self.fm["model"], self.fm["effort"], self.fm["tools"]),
+                         ("git-preflight", "haiku", "medium", "Bash"))
+
+    def test_output_contract(self):
+        for s in ("**Verdict:**", "**Cause:**", "**Evidence:**", "**Healed:**", "**User action:**", "READY", "BLOCKED"):
+            self.assertIn(s, self.body)
+
+    def test_safety_rules(self):
+        for s in ("sudo", "ssh-add", "force-push", "git branch -D", "git reset"):
+            self.assertIn(s, self.body)  # each named in the never-do rules
+
+    def test_upstream_remote(self):
+        self.assertIn("@{u}", self.body)
+        self.assertNotIn("git remote get-url origin", self.body)
+
+    def test_https_and_other_hosts(self):
+        self.assertIn("gh auth status", self.body)
+        self.assertIn("HTTPS auth not checked", self.body)
+        self.assertIn("not GitHub", self.body)
+
+    def test_linked_worktree_no_heal(self):
+        self.assertIn("--git-common-dir", self.body)
+        self.assertIn("linked worktree", self.body)
+
+
 if __name__ == "__main__":
     unittest.main()
